@@ -883,6 +883,61 @@ static void update_EEPROM()
 }
 #endif // UPDATE_EEPROM_ENABLE
 
+/*
+  the shortest pulse a 19200 baud bootloader UART can produce is one
+  bit time, so anything much shorter than that cannot be bootloader
+  traffic
+ */
+#define FAST_SIGNAL_MAX_PULSE_US (BITTIME/2)
+
+// number of short pulses needed before we declare a fast signal
+#define FAST_SIGNAL_MIN_PULSES 8
+
+/*
+  how long to watch the pin for. The slowest DShot rate a flight
+  controller will use repeats well inside this window
+ */
+#define FAST_SIGNAL_WINDOW_US 2000
+
+/*
+  detect a fast digital signal on the input pin
+
+  DShot, bidirectional DShot, Multishot and Oneshot all contain pulses
+  far shorter than one 19200 baud bit time. If we see enough of them
+  then a flight controller is driving the pin and we should be running
+  the main firmware rather than sitting in the bootloader.
+
+  This has to be done with edge timing rather than by sampling the pin
+  level. Normal DShot idles low, but bidirectional DShot idles high,
+  which is indistinguishable from an idle bootloader UART if you only
+  look at levels.
+ */
+static bool detect_fast_input_signal(void)
+{
+  uint8_t short_pulses = 0;
+  bool last_level = gpio_read(input_pin);
+  uint16_t last_edge = 0;
+
+  bl_timer_reset();
+
+  while (bl_timer_elapsed() < FAST_SIGNAL_WINDOW_US) {
+    const bool level = gpio_read(input_pin);
+    if (level == last_level) {
+      continue;
+    }
+    last_level = level;
+
+    const uint16_t now = bl_timer_elapsed();
+    if (now - last_edge < FAST_SIGNAL_MAX_PULSE_US &&
+        ++short_pulses >= FAST_SIGNAL_MIN_PULSES) {
+      return true;
+    }
+    last_edge = now;
+  }
+
+  return false;
+}
+
 #define low_pin_count_threshold 450		// count signal pin is low before determining jump to main firmware
 #define pull_down_pin_count_interations 4000		// greater interations extend grace period for input devices booting with signal pin high
 static void checkForSignal()
@@ -892,6 +947,17 @@ static void checkForSignal()
   gpio_mode_set_input(input_pin, GPIO_PULL_DOWN);
 
   delayMicroseconds(500);
+
+  /*
+    if a fast signal is already being driven onto the pin then a
+    flight controller is talking to us and we should boot the main
+    firmware. The level based checks below cannot see an inverted
+    (bidirectional) DShot signal, as that idles high and so looks the
+    same as a bootloader client holding the line high.
+  */
+  if (detect_fast_input_signal()) {
+    jump();
+  }
 
   for (int i = 0 ; i < pull_down_pin_count_interations ; i ++) {
     if (!gpio_read(input_pin)) {
@@ -1037,6 +1103,17 @@ int main(void)
     receiveBuffer();
 
     if (invalid_command > 100) {
+      jump();
+    }
+
+    /*
+      the flight controller may only start driving the pin after we
+      have finished checkForSignal(), which is common with
+      bidirectional DShot as that leaves the line idle high while the
+      flight controller boots. Once we start failing to decode bytes,
+      check whether that is because a fast signal has appeared.
+    */
+    if (invalid_command > 0 && detect_fast_input_signal()) {
       jump();
     }
 #if DRONECAN_SUPPORT
