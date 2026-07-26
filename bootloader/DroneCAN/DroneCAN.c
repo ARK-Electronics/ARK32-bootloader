@@ -809,8 +809,11 @@ bool DroneCAN_update()
 
 /*
   implementation of memmem() for finding app signature
+
+  not called memmem() as newer newlib declares that in string.h and a
+  static definition of the same name is a conflicting redeclaration
  */
-static void *memmem(const void *haystack, size_t haystacklen, const void *needle, size_t needlelen)
+static void *bl_memmem(const void *haystack, size_t haystacklen, const void *needle, size_t needlelen)
 {
   while (haystacklen >= needlelen) {
     char *p = (char *)memchr(haystack, *(const char *)needle, haystacklen-(needlelen-1));
@@ -857,7 +860,7 @@ bool DroneCAN_boot_ok(void)
   uint32_t sig[2] = { APP_SIGNATURE_MAGIC1, APP_SIGNATURE_MAGIC2 };
   const uint32_t app_max_len = (128-18)*1024;
   const uint8_t *fw_base = (const uint8_t *)MAIN_FW_START_ADDR;
-  struct app_signature *appsig = memmem(fw_base, app_max_len, sig, sizeof(sig));
+  struct app_signature *appsig = bl_memmem(fw_base, app_max_len, sig, sizeof(sig));
   if (appsig == NULL || (((uint32_t)appsig) & 3) != 0) {
     set_reason(FAIL_REASON_NO_APP_SIG, "no app signature");
     return false;
