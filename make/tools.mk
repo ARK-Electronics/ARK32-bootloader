@@ -4,9 +4,14 @@
 #
 ###############################################################
 
+# Pin the xPack GNU Arm Embedded GCC version used for local builds and CI.
+# Keep in sync with make/tools_install.mk (arm_sdk_install downloads this).
+XPACK_GCC_VER := 15.2.1-1.1
+XPACK_GCC_DIR := xpack-arm-none-eabi-gcc-$(XPACK_GCC_VER)
+
 ifeq ($(MSYSTEM),UCRT64)
 OSDIR:=windows
-ARM_SDK_PREFIX:=tools/windows/xpack-arm-none-eabi-gcc-10.3.1-2.3/bin/arm-none-eabi-
+ARM_SDK_PREFIX:=tools/windows/$(XPACK_GCC_DIR)/bin/arm-none-eabi-
 CP:=cp
 DSEP:=/
 NUL:=/dev/null
@@ -18,7 +23,7 @@ else
 
 ifeq ($(OS),Windows_NT)
 OSDIR:=windows
-ARM_SDK_PREFIX:=tools/windows/xpack-arm-none-eabi-gcc-10.3.1-2.3/bin/arm-none-eabi-
+ARM_SDK_PREFIX:=tools/windows/$(XPACK_GCC_DIR)/bin/arm-none-eabi-
 SHELL:=cmd.exe
 CP:=tools\\windows\\make\\bin\\cp
 DSEP:=\\
@@ -33,7 +38,7 @@ else
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 OSDIR:=macos
-ARM_SDK_PREFIX:=tools/macos/xpack-arm-none-eabi-gcc-10.3.1-2.3/bin/arm-none-eabi-
+ARM_SDK_PREFIX:=tools/macos/$(XPACK_GCC_DIR)/bin/arm-none-eabi-
 CP:=cp
 DSEP:=/
 NUL:=/dev/null
@@ -46,7 +51,7 @@ MCU_NOBUILD:=V203
 else
 # assume Linux
 OSDIR:=linux
-ARM_SDK_PREFIX:=tools/linux/xpack-arm-none-eabi-gcc-10.3.1-2.3/bin/arm-none-eabi-
+ARM_SDK_PREFIX:=tools/linux/$(XPACK_GCC_DIR)/bin/arm-none-eabi-
 CP:=cp
 DSEP:=/
 NUL:=/dev/null

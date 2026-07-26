@@ -52,6 +52,15 @@ CFLAGS_BASE += -Wall -Wextra -Wundef -Werror -Wno-unused-parameter
 
 CFLAGS_COMMON := $(CFLAGS_BASE)
 
+# GCC 14 and later recognise the bit-by-bit loop in crc16() and replace
+# it with a 256 entry lookup table. That is faster, but it costs 512
+# bytes of .rodata which does not fit in the 4k bootloader region, and
+# the bootloader has no need for a fast CRC at 19200 baud.
+#
+# Only applied to targets built with the pinned Arm compiler. The V203
+# RISC-V toolchain is GCC 8 and rejects the option.
+CFLAGS_ARM_ONLY := -fno-optimize-crc
+
 # Linker options
 LDFLAGS_COMMON := -specs=nano.specs $(LIBS) -Wl,--gc-sections -Wl,--print-memory-usage
 
@@ -157,6 +166,8 @@ $(eval BLU_TARGET := $(call BOOTLOADER_UPDATE_BASENAME,$(BUILD),$(PIN)))
 
 # get MCU specific compiler, objcopy and link script or use the ARM SDK one
 $(eval xCC := $(if $($(MCU)_CC), $($(MCU)_CC), $(CC)))
+# MCUs with their own compiler (V203) do not get the Arm only flags
+$(eval xCFLAGS_ARM := $(if $($(MCU)_CC),,$(CFLAGS_ARM_ONLY)))
 $(eval xOBJCOPY := $(if $($(MCU)_OBJCOPY), $($(MCU)_OBJCOPY), $(OBJCOPY)))
 $(eval xLDSCRIPT := $(if $($(MCU)_LDSCRIPT), $($(MCU)_LDSCRIPT), $$(if $$(call has_can_suffix,$$(BUILD)),$(LDSCRIPT_BL_CAN),$(LDSCRIPT_BL))))
 $(eval xBLU_LDSCRIPT := $(if $($(MCU)_LDSCRIPT_BLU), $($(MCU)_LDSCRIPT_BLU), $$(if $$(call has_can_suffix,$$(BUILD)),$(LDSCRIPT_BLU_CAN),$(LDSCRIPT_BLU))))
@@ -166,7 +177,7 @@ $(eval SRC_DRONECAN := $(if $(call has_can_suffix,$(1)),$(SRC_DRONECAN_$(MCU))))
 -include $(DEP_FILE)
 -include $(BLU_DEP_FILE)
 
-$(ELF_FILE): CFLAGS_BL := $$(MCU_$(MCU)) $$(CFLAGS_$(MCU)) $$(CFLAGS_BASE) -DBOOTLOADER -DUSE_$(PIN) $(EXTRA_CFLAGS) -DAM32_MCU=\"$(MCU)\" $$(CFLAGS_DRONECAN)
+$(ELF_FILE): CFLAGS_BL := $$(MCU_$(MCU)) $$(CFLAGS_$(MCU)) $$(CFLAGS_BASE) -DBOOTLOADER -DUSE_$(PIN) $(EXTRA_CFLAGS) -DAM32_MCU=\"$(MCU)\" $$(CFLAGS_DRONECAN) $(xCFLAGS_ARM)
 $(ELF_FILE): LDFLAGS_BL := $$(LDFLAGS_COMMON) $$(LDFLAGS_$(MCU)) -T$(xLDSCRIPT)
 $(ELF_FILE): $$(SRC_$(MCU)_BL) $$(SRC_BL) $$(SRC_DRONECAN)
 	$$(QUIET)echo building bootloader for $(BUILD) with pin $(PIN)
@@ -180,7 +191,7 @@ $(ELF_FILE): $$(SRC_$(MCU)_BL) $$(SRC_BL) $$(SRC_DRONECAN)
 $(H_FILE): $(BIN_FILE)
 	$$(QUIET)python3 bl_update/make_binheader.py $(BIN_FILE) $(H_FILE)
 
-$(BLU_ELF_FILE): CFLAGS_BLU := -DAM32_MCU=\"$(MCU)\" $$(MCU_$(MCU)) $$(CFLAGS_$(MCU)) $$(CFLAGS_BASE) -DBOOTLOADER -DUSE_$(PIN) $(EXTRA_CFLAGS) -Wno-unused-variable -Wno-unused-function
+$(BLU_ELF_FILE): CFLAGS_BLU := -DAM32_MCU=\"$(MCU)\" $$(MCU_$(MCU)) $$(CFLAGS_$(MCU)) $$(CFLAGS_BASE) -DBOOTLOADER -DUSE_$(PIN) $(EXTRA_CFLAGS) -Wno-unused-variable -Wno-unused-function $(xCFLAGS_ARM)
 $(BLU_ELF_FILE): LDFLAGS_BLU := $$(LDFLAGS_COMMON) $$(LDFLAGS_$(MCU)) -T$(xBLU_LDSCRIPT)
 $(BLU_ELF_FILE): $$(SRC_$(MCU)_BL) $$(SRC_BLU) $(H_FILE)
 	$$(QUIET)echo building bootloader updater for $(BUILD) with pin $(PIN)
@@ -222,6 +233,10 @@ pins_for_build = $(if $(BOOTLOADER_PINS_$(call base_mcu,$1)),$(BOOTLOADER_PINS_$
 $(foreach BUILD,$(MCU_BUILDS),$(foreach PIN,$(call pins_for_build,$(BUILD)),$(eval $(call CREATE_BOOTLOADER_TARGET,$(BUILD),$(PIN)))))
 
 bootloaders: $(ALL_BUILDS)
+
+# print the size of every built bootloader, used by CI
+sizes:
+	$(QUIET)$(ARM_SDK_PREFIX)size $(OBJ)/*.elf
 
 updaters: $(BLU_BUILDS)
 
