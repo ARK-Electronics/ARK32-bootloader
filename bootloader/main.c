@@ -55,6 +55,17 @@
  */
 #define UPDATE_EEPROM_ENABLE 1
 
+/*
+  should checkForSignal() look for a bootloader client that is already
+  sending when we power up? Without this the level checks read 19200
+  traffic as a pin that has been pulled low and boot the application
+  instead of answering. Targets with no room left in a 4k bootloader
+  region turn it off in their makefile.
+ */
+#ifndef DETECT_SERIAL_CLIENT
+#define DETECT_SERIAL_CLIENT 1
+#endif
+
 #include <string.h>
 
 #ifndef MCU_FLASH_START
@@ -294,7 +305,18 @@ static void jump()
 #else
   uint8_t value = *(uint8_t*)(EEPROM_START_ADD);
 #endif
-  if (value != 0x01) {      // check first byte of eeprom to see if its programmed, if not do not jump
+  /*
+    byte 0 of the eeprom is set to 0x01 once the settings have been
+    written, so a different value means the board has not been
+    configured. A blank byte is the exception: that is either a board
+    that has never been configured or an update_EEPROM() that lost
+    power during the page erase, and in both cases there can still be
+    perfectly good firmware in flash. The application header checks
+    below are what actually prove that, so refusing on a blank byte
+    only serves to trap a working board in the bootloader with no way
+    out except a configurator.
+  */
+  if (value != 0x01 && value != 0xFF) {
     invalid_command = 0;
     return;
   }
@@ -838,6 +860,26 @@ static void receiveBuffer()
 }
 
 #ifdef UPDATE_EEPROM_ENABLE
+// save_flash_nolib may not support writes larger than this
+#define EEPROM_CHUNK_SIZE 256
+
+/*
+  Updating the version means erasing the whole eeprom page and writing
+  it back, and there is no second page to stage a copy in, so for as
+  long as that takes the settings exist only in ram. Three things stop
+  that from being a board that comes back wrong:
+
+  - it only runs on a software reset, which in practice means the user
+    asked the firmware to enter the bootloader, so the board is on a
+    bench rather than in the air
+  - only the first chunk is rewritten. The page erase leaves the rest
+    at 0xFF, which is what it already was, so the programming half of
+    the window is a quarter of what it would be. If anything is
+    stored past the first chunk we leave the version alone rather
+    than put the settings at risk to update a version byte
+  - if power is lost anyway, jump() still boots a blank eeprom, so the
+    board runs its firmware on defaults instead of stopping
+ */
 static void update_EEPROM()
 {
   if (!bl_was_software_reset()) {
@@ -851,35 +893,23 @@ static void update_EEPROM()
 #else
   const uint8_t *eeprom = (const uint8_t *)EEPROM_START_ADD;
 #endif
-  if (BOOTLOADER_VERSION != eeprom[2]) {
-    if (eeprom[2] == 0xFF || eeprom[2] == 0x00) {
+  if (BOOTLOADER_VERSION == eeprom[2] || eeprom[2] == 0xFF || eeprom[2] == 0x00) {
+    return;
+  }
+
+  for (uint32_t i = EEPROM_CHUNK_SIZE; i < EEPROM_MAX_SIZE; i++) {
+    if (eeprom[i] != 0xFF) {
       return;
     }
-
-    // update only the bootloader version, preserve all other bytes up to EEPROM_MAX_SIZE
-    uint8_t data[EEPROM_MAX_SIZE];
-	memcpy(data, eeprom, EEPROM_MAX_SIZE);
-	data[2] = BOOTLOADER_VERSION;
-
-#ifdef NXP
-    uint8_t *p = &data[0];
-
-    save_flash_nolib(p, EEPROM_MAX_SIZE, EEPROM_START_ADD);
-#else
-    // flash in 256 byte chunks as save_flash_nolib may not support larger chunks
-    uint32_t remaining = EEPROM_MAX_SIZE;
-    uint32_t addr = EEPROM_START_ADD;
-    const uint8_t *p = &data[0];
-
-    while (remaining > 0) {
-      const uint32_t chunk = 256;
-      save_flash_nolib(p, chunk, addr);
-      p += chunk;
-      addr += chunk;
-      remaining -= chunk;
-    }
-#endif
   }
+
+  // update only the bootloader version, preserve every other byte
+  uint8_t data[EEPROM_CHUNK_SIZE];
+  memcpy(data, eeprom, EEPROM_CHUNK_SIZE);
+  data[2] = BOOTLOADER_VERSION;
+
+  // this write is also what erases the page, so it has to come last
+  save_flash_nolib(data, EEPROM_CHUNK_SIZE, EEPROM_START_ADD);
 }
 #endif // UPDATE_EEPROM_ENABLE
 
@@ -938,6 +968,77 @@ static bool detect_fast_input_signal(void)
   return false;
 }
 
+/*
+  look for 19200 framing on the input pin
+
+  A bootloader client that is already sending when we power up holds
+  the line low for most of every byte, and the level checks in
+  checkForSignal() read that as a pin that has been pulled low, so we
+  boot the firmware instead of answering. Framing tells the two apart:
+  take a falling edge as a start bit and check that the stop bit of
+  that byte and of the several after it all land high on the 19200
+  grid.
+
+  Being wrong in the direction of staying here is cheap. If an input
+  protocol happens to fool this, the main loop boots the firmware a
+  few ms later through detect_fast_input_signal() or the invalid
+  command count. Being wrong the other way is what leaves a board that
+  cannot be flashed.
+ */
+#if DETECT_SERIAL_CLIENT
+static bool detect_serial_framing(void)
+{
+  for (uint8_t tries = 0; tries < 8; tries++) {
+    bool was_high = false;
+    bool falling_edge = false;
+
+    bl_timer_reset();
+    while (bl_timer_elapsed() < 20U*BITTIME) {
+      if (gpio_read(input_pin)) {
+        was_high = true;
+      } else if (was_high) {
+        falling_edge = true;
+        break;
+      }
+    }
+
+    if (!falling_edge) {
+      return false;		// nothing is switching, so nothing is sending
+    }
+
+    /*
+      Treat the edge as a start bit and look for a run of stop bits
+      on the 19200 grid, never resyncing. A client sends its packet
+      back to back, so every tenth bit from here has to be high.
+
+      The run has to be several bytes long. Oneshot125 repeats every
+      500us against a byte time of 520us, so it lines up with one or
+      two stop bits often enough to matter, but 20us of drift per
+      byte pulls it off the grid before the run is done.
+
+      Picking the signal up mid byte lands on a data bit rather than
+      a start bit, which is what the retries are for.
+    */
+    uint8_t stop_bits = 0;
+
+    delayMicroseconds(9U*BITTIME + HALFBITTIME);
+    while (gpio_read(input_pin)) {
+      if (++stop_bits >= 5) {
+        return true;
+      }
+      delayMicroseconds(10U*BITTIME);
+    }
+  }
+
+  return false;
+}
+#else
+static bool detect_serial_framing(void)
+{
+  return false;
+}
+#endif // DETECT_SERIAL_CLIENT
+
 #define low_pin_count_threshold 450		// count signal pin is low before determining jump to main firmware
 #define pull_down_pin_count_interations 4000		// greater interations extend grace period for input devices booting with signal pin high
 static void checkForSignal()
@@ -970,6 +1071,9 @@ static void checkForSignal()
     }
   }
   if (low_pin_count > low_pin_count_threshold) {		// pulled low & majority stayed low - jump to application
+    if (detect_serial_framing()) {
+      return;		// a client is sending to us, the pin is not pulled low
+    }
 #if CHECK_SOFTWARE_RESET
     if (!bl_was_software_reset()) {
       jump();
@@ -1009,7 +1113,7 @@ static void checkForSignal()
     delayMicroseconds(10);
   }
 
-  if (low_pin_count > 0) {
+  if (low_pin_count > 0 && !detect_serial_framing()) {
     jump();		// floating & low at least once - jump to application
   }
 }

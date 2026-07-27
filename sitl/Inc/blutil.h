@@ -71,12 +71,12 @@ static inline void bl_gpio_init(void)
 }
 
 /*
-  a power on reset, which is what matters for the boot decision. On a
-  software reset checkForSignal() deliberately stays in the bootloader.
+  on a software reset checkForSignal() deliberately stays in the
+  bootloader, and update_EEPROM() is allowed to run
  */
 static inline bool bl_was_software_reset(void)
 {
-    return false;
+    return sitl_was_software_reset();
 }
 
 static inline void jump_to_application(void)

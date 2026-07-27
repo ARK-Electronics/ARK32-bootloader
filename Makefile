@@ -168,6 +168,9 @@ $(eval BLU_TARGET := $(call BOOTLOADER_UPDATE_BASENAME,$(BUILD),$(PIN)))
 $(eval xCC := $(if $($(MCU)_CC), $($(MCU)_CC), $(CC)))
 # MCUs with their own compiler (V203) do not get the Arm only flags
 $(eval xCFLAGS_ARM := $(if $($(MCU)_CC),,$(CFLAGS_ARM_ONLY)))
+# per MCU flags for builds that have to fit the 4k bootloader region.
+# DroneCAN builds link against a 16k region and do not need them.
+$(eval xCFLAGS_4K := $(if $(call has_can_suffix,$(1)),,$(CFLAGS_4K_$(MCU))))
 $(eval xOBJCOPY := $(if $($(MCU)_OBJCOPY), $($(MCU)_OBJCOPY), $(OBJCOPY)))
 $(eval xLDSCRIPT := $(if $($(MCU)_LDSCRIPT), $($(MCU)_LDSCRIPT), $$(if $$(call has_can_suffix,$$(BUILD)),$(LDSCRIPT_BL_CAN),$(LDSCRIPT_BL))))
 $(eval xBLU_LDSCRIPT := $(if $($(MCU)_LDSCRIPT_BLU), $($(MCU)_LDSCRIPT_BLU), $$(if $$(call has_can_suffix,$$(BUILD)),$(LDSCRIPT_BLU_CAN),$(LDSCRIPT_BLU))))
@@ -177,7 +180,7 @@ $(eval SRC_DRONECAN := $(if $(call has_can_suffix,$(1)),$(SRC_DRONECAN_$(MCU))))
 -include $(DEP_FILE)
 -include $(BLU_DEP_FILE)
 
-$(ELF_FILE): CFLAGS_BL := $$(MCU_$(MCU)) $$(CFLAGS_$(MCU)) $$(CFLAGS_BASE) -DBOOTLOADER -DUSE_$(PIN) $(EXTRA_CFLAGS) -DAM32_MCU=\"$(MCU)\" $$(CFLAGS_DRONECAN) $(xCFLAGS_ARM)
+$(ELF_FILE): CFLAGS_BL := $$(MCU_$(MCU)) $$(CFLAGS_$(MCU)) $$(CFLAGS_BASE) -DBOOTLOADER -DUSE_$(PIN) $(EXTRA_CFLAGS) -DAM32_MCU=\"$(MCU)\" $$(CFLAGS_DRONECAN) $(xCFLAGS_ARM) $(xCFLAGS_4K)
 $(ELF_FILE): LDFLAGS_BL := $$(LDFLAGS_COMMON) $$(LDFLAGS_$(MCU)) -T$(xLDSCRIPT)
 $(ELF_FILE): $$(SRC_$(MCU)_BL) $$(SRC_BL) $$(SRC_DRONECAN)
 	$$(QUIET)echo building bootloader for $(BUILD) with pin $(PIN)

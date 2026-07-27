@@ -69,6 +69,22 @@ uint16_t sitl_timer_us(void);
 void sitl_flash_init(void);
 void *sitl_flash_ptr(uint32_t address, uint32_t len);
 
+#define SITL_EEPROM_OFFSET 0x7C00
+
+/*
+  the state the board comes up in: whether this was a software reset,
+  what byte 0 of the eeprom says (0x01 configured, 0xFF erased) and
+  what bootloader version is recorded in byte 2
+ */
+void sitl_set_boot_state(bool software_reset, uint8_t eeprom_byte0,
+                         uint8_t eeprom_version);
+bool sitl_was_software_reset(void);
+
+/* how much of the eeprom page the bootloader rewrote */
+unsigned sitl_flash_write_count(void);
+uint32_t sitl_flash_written_bytes(void);
+uint8_t sitl_eeprom_byte(uint32_t index);
+
 /* -------------------------------------------------------------- */
 /* running the bootloader                                           */
 /* -------------------------------------------------------------- */

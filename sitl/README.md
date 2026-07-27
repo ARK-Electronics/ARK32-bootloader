@@ -29,7 +29,11 @@ headers it includes are replaced by the ones in `sitl/Inc`:
 | `Inc/eeprom.h`   | `read_flash_bin()`, `save_flash_nolib()`                    |
 
 The simulated target is an F051 on PB4 with 32k of flash, which is the
-ARK 4IN1.
+ARK 4IN1. The boot decision code is shared by every target, so the coverage
+carries, with one exception: the G431 builds that have to fit a 4k bootloader
+region set `DETECT_SERIAL_CLIENT=0` because the check does not fit, and the
+"UART client already talking" case does not apply to them. The G431 DroneCAN
+build links against 16k and keeps it.
 
 `sitl_hw.c` mmaps real memory at `0x08000000`, so the eeprom read and the
 application header check in `jump()` run against a plausible flashed board
@@ -70,16 +74,25 @@ onto the wire, and the bootloader session test requires the correct 9 byte
 device info reply. That checks the boot decision code has not broken the
 protocol it exists to serve.
 
+### Boot state
+
+A scenario also sets what the board comes up as: whether this was a software
+reset, and what the eeprom holds. That covers the paths that decide whether
+there is anything worth booting:
+
+- an **erased eeprom** with a valid application still has to boot, otherwise a
+  power cut during a settings write leaves a board that only a configurator
+  can rescue
+- an eeprom that says **not configured** still waits for a client
+- the **version update** only runs on a software reset, and rewrites one 256
+  byte chunk rather than the whole page, which is checked by counting the
+  bytes the bootloader programs
+
 ## What the tests assert
 
 A flight controller driving the pin means the ESC has to run the main
 firmware, within 500 ms of power up. Anything else means stay in the
-bootloader.
-
-One case is marked `XFAIL`: a configurator that is already streaming when the
-ESC powers up is read as a low pin by the level based checks and the ESC boots
-the app. That behaviour is the same before and after the DShot detection
-change, so it is reported but not enforced.
+bootloader, answering a client if there is one.
 
 ## Proving the tests catch the bug
 

@@ -23,6 +23,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <version.h>
+
 #include "signals.h"
 #include "sitl.h"
 
@@ -52,6 +54,18 @@ typedef struct {
     sitl_outcome_t expect;
     bool expect_devinfo; /* must also answer a configurator */
     bool known_fail;     /* pre-existing behaviour, reported not enforced */
+
+    /* the state the board powers up in */
+    bool software_reset;
+    bool set_eeprom_byte0;  /* otherwise the board is configured, 0x01 */
+    uint8_t eeprom_byte0;
+    uint8_t eeprom_version; /* 0 means the default of 18 */
+
+    /* checks on what the bootloader did to the eeprom page */
+    bool check_eeprom;
+    uint8_t expect_version;      /* eeprom byte 2 after the run */
+    uint32_t expect_flash_bytes; /* how much of the page it rewrote */
+
     const char *why;
 } test_case_t;
 
@@ -182,8 +196,69 @@ static const test_case_t cases[] = {
         .name = "UART client already talking",
         .wave = &sig_uart_bl_repeat,
         .expect = SITL_TIMEOUT,
-        .known_fail = true,
-        .why = "pre-existing: the level checks read 19200 traffic as a low pin",
+        .why = "a client sending at power up must not be read as a low pin",
+    },
+
+    /* ---- the eeprom must never be able to trap a bootable board ---- */
+    {
+        .name = "erased eeprom, app present",
+        .wave = &sig_idle_low,
+        .set_eeprom_byte0 = true,
+        .eeprom_byte0 = 0xFF,
+        .eeprom_version = 0xFF,
+        .expect = SITL_JUMPED,
+        .why = "a lost eeprom must not stop firmware that is there",
+    },
+    {
+        .name = "erased eeprom, DShot600",
+        .wave = &sig_dshot600_8k,
+        .set_eeprom_byte0 = true,
+        .eeprom_byte0 = 0xFF,
+        .eeprom_version = 0xFF,
+        .expect = SITL_JUMPED,
+        .why = "a lost eeprom must not stop firmware that is there",
+    },
+    {
+        .name = "unconfigured eeprom",
+        .wave = &sig_idle_low,
+        .set_eeprom_byte0 = true,
+        .eeprom_byte0 = 0x00,
+        .expect = SITL_TIMEOUT,
+        .why = "a deliberately unprogrammed board still waits for a client",
+    },
+
+    /* ---- the version update must keep the page rewrite small ---- */
+    {
+        .name = "eeprom version update",
+        .wave = &sig_idle_high,
+        .software_reset = true,
+        .eeprom_version = 18,
+        .expect = SITL_TIMEOUT,
+        .check_eeprom = true,
+        .expect_version = BOOTLOADER_VERSION,
+        .expect_flash_bytes = 256,
+        .why = "one chunk rewritten, so the settings are exposed for less time",
+    },
+    {
+        .name = "eeprom version already right",
+        .wave = &sig_idle_high,
+        .software_reset = true,
+        .eeprom_version = BOOTLOADER_VERSION,
+        .expect = SITL_TIMEOUT,
+        .check_eeprom = true,
+        .expect_version = BOOTLOADER_VERSION,
+        .expect_flash_bytes = 0,
+        .why = "nothing to do, so the page is never erased",
+    },
+    {
+        .name = "eeprom update, power on reset",
+        .wave = &sig_idle_high,
+        .eeprom_version = 18,
+        .expect = SITL_TIMEOUT,
+        .check_eeprom = true,
+        .expect_version = 18,
+        .expect_flash_bytes = 0,
+        .why = "only a software reset may touch the settings",
     },
 };
 
@@ -207,6 +282,9 @@ static const sitl_cpu_speed_t speeds[] = {
 typedef struct {
     int outcome;
     uint64_t jump_ns;
+    uint32_t flash_bytes;
+    uint8_t eeprom_byte0;
+    uint8_t eeprom_version;
     uint8_t tx_len;
     uint8_t tx[16];
 } run_result_t;
@@ -245,11 +323,17 @@ static bool run_child(const test_case_t *tc, const sitl_cpu_speed_t *speed,
         };
         sitl_set_stimulus(&stim);
         sitl_set_cpu_speed(speed);
+        sitl_set_boot_state(tc->software_reset,
+                            tc->set_eeprom_byte0 ? tc->eeprom_byte0 : 0x01,
+                            tc->eeprom_version ? tc->eeprom_version : 18);
 
         run_result_t r;
         memset(&r, 0, sizeof(r));
         r.outcome = (int)sitl_run(DEADLINE_NS);
         r.jump_ns = sitl_jump_time_ns();
+        r.flash_bytes = sitl_flash_written_bytes();
+        r.eeprom_byte0 = sitl_eeprom_byte(0);
+        r.eeprom_version = sitl_eeprom_byte(2);
 
         uint8_t tx[64];
         const size_t n = sitl_decode_tx(tx, sizeof(tx));
@@ -361,6 +445,11 @@ int main(int argc, char **argv)
                            (r.tx_len != sizeof(expected_devinfo) ||
                             memcmp(r.tx, expected_devinfo, sizeof(expected_devinfo)) != 0)) {
                     note = "NO DEVICE INFO REPLY";
+                } else if (tc->check_eeprom && r.flash_bytes != tc->expect_flash_bytes) {
+                    note = "WRONG AMOUNT OF EEPROM REWRITTEN";
+                } else if (tc->check_eeprom && (r.eeprom_version != tc->expect_version ||
+                                                r.eeprom_byte0 != 0x01)) {
+                    note = "EEPROM LEFT WRONG";
                 }
 
                 if (note != NULL) {

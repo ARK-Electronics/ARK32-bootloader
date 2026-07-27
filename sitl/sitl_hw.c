@@ -166,14 +166,40 @@ void sitl_flash_init(void)
     app[1] = 0x08001101; /* thumb entry point just after the vectors */
 
     /*
-      a programmed eeprom. Byte 0 must be 0x01 or jump() bails out,
-      byte 2 is the bootloader version.
+      a programmed eeprom. Byte 0 says the settings have been written,
+      byte 2 is the bootloader version. AM32 keeps its settings in the
+      first few dozen bytes and leaves the rest of the page erased,
+      which is what update_EEPROM() relies on.
      */
-    uint8_t *eeprom = flash + 0x7C00;
-    memset(eeprom, 0x00, 1024);
+    uint8_t *eeprom = flash + SITL_EEPROM_OFFSET;
+    memset(eeprom, 0xFF, 1024);
     eeprom[0] = 0x01;
     eeprom[1] = 0x02;
     eeprom[2] = 18;
+    for (unsigned i = 3; i < 48; i++) {
+        eeprom[i] = (uint8_t)i;
+    }
+}
+
+static bool software_reset;
+
+void sitl_set_boot_state(bool was_software_reset, uint8_t eeprom_byte0,
+                         uint8_t eeprom_version)
+{
+    sitl_flash_init();
+    software_reset = was_software_reset;
+    flash[SITL_EEPROM_OFFSET] = eeprom_byte0;
+    flash[SITL_EEPROM_OFFSET + 2] = eeprom_version;
+}
+
+bool sitl_was_software_reset(void)
+{
+    return software_reset;
+}
+
+uint8_t sitl_eeprom_byte(uint32_t index)
+{
+    return flash ? flash[SITL_EEPROM_OFFSET + index] : 0;
 }
 
 void *sitl_flash_ptr(uint32_t address, uint32_t len)
@@ -198,6 +224,19 @@ void read_flash_bin(uint8_t *data, uint32_t add, int out_buff_len)
     memcpy(data, src, (size_t)out_buff_len);
 }
 
+static unsigned flash_writes;
+static uint32_t flash_written_bytes;
+
+unsigned sitl_flash_write_count(void)
+{
+    return flash_writes;
+}
+
+uint32_t sitl_flash_written_bytes(void)
+{
+    return flash_written_bytes;
+}
+
 bool save_flash_nolib(const uint8_t *data, uint32_t length, uint32_t add)
 {
     void *dst = sitl_flash_ptr(add, length);
@@ -205,6 +244,19 @@ bool save_flash_nolib(const uint8_t *data, uint32_t length, uint32_t add)
     if (dst == NULL) {
         return false;
     }
+
+    flash_writes++;
+    flash_written_bytes += length;
+
+    /*
+      the page erase that comes with a write to the start of the page.
+      Everything after the data written is left erased, which is what
+      makes a power cut here lose the settings.
+     */
+    if (add == SITL_FLASH_BASE + SITL_EEPROM_OFFSET) {
+        memset(dst, 0xFF, 1024);
+    }
+
     memcpy(dst, data, length);
     return true;
 }
@@ -248,6 +300,8 @@ sitl_outcome_t sitl_run(uint64_t deadline)
     jump_ns = 0;
     stim_hold_ns = 0;
     n_tx_edges = 0;
+    flash_writes = 0;
+    flash_written_bytes = 0;
     pin_is_output = false;
     pin_out_level = true;
     deadline_ns = deadline;
