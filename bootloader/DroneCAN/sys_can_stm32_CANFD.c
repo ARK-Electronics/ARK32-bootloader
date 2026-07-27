@@ -132,52 +132,60 @@ static void handleRxInterrupt(uint8_t fifo_index)
   uint32_t get_index_mask = (fifo_index == 0) ? FDCAN_RXF0S_F0GI : FDCAN_RXF1S_F1GI;
   uint32_t get_index_shift = (fifo_index == 0) ? FDCAN_RXF0S_F0GI_SHIFT : FDCAN_RXF1S_F1GI_SHIFT;
   
-  // Check if FIFO has messages
-  if ((*fifo_status_reg & fifo_level_mask) == 0) {
-    return;
+  // Drain every queued frame. The FIFO new-message interrupt is not re-asserted
+  // for frames already queued, so reading only one per IRQ would delay the rest
+  // until the next frame arrives.
+  while ((*fifo_status_reg & fifo_level_mask) != 0) {
+    // Get the get index
+    uint32_t get_index = (*fifo_status_reg & get_index_mask) >> get_index_shift;
+
+    // Calculate address in message RAM
+    uint32_t rx_fifo_addr = (fifo_index == 0) ? MessageRam_RxFIFO0SA : MessageRam_RxFIFO1SA;
+    volatile RxMessageRAM *rx_mailbox = (volatile RxMessageRAM *)(rx_fifo_addr + (get_index * FDCAN_FRAME_BUFFER_SIZE * 4));
+
+    // Read the frame
+    CanardCANFrame frame = {};
+
+    uint32_t id_flags = rx_mailbox->id_flags;
+    if (id_flags & (1U << 30)) {
+      frame.id = (id_flags & MaskExtID) | CANARD_CAN_FRAME_EFF;
+    } else {
+      frame.id = (id_flags >> 18) & MaskStdID;
+    }
+
+    if (id_flags & (1U << 29)) {
+      frame.id |= CANARD_CAN_FRAME_RTR;
+    }
+
+    // Get DLC
+    uint32_t dlc = (rx_mailbox->dlc_timestamp >> 16) & 0xF;
+    frame.data_len = dlc;
+
+    // Copy data
+    uint32_t *data_ptr = (uint32_t *)frame.data;
+    for (int i = 0; i < 2; i++) {
+      data_ptr[i] = rx_mailbox->data[i];
+    }
+
+    // Acknowledge the read
+    *fifo_ack_reg = get_index;
+
+    // Process the frame
+    DroneCAN_handleFrame(&frame);
   }
-  
-  // Get the get index
-  uint32_t get_index = (*fifo_status_reg & get_index_mask) >> get_index_shift;
-  
-  // Calculate address in message RAM
-  uint32_t rx_fifo_addr = (fifo_index == 0) ? MessageRam_RxFIFO0SA : MessageRam_RxFIFO1SA;
-  volatile RxMessageRAM *rx_mailbox = (volatile RxMessageRAM *)(rx_fifo_addr + (get_index * FDCAN_FRAME_BUFFER_SIZE * 4));
-  
-  // Read the frame
-  CanardCANFrame frame = {};
-  
-  uint32_t id_flags = rx_mailbox->id_flags;
-  if (id_flags & (1U << 30)) {
-    frame.id = (id_flags & MaskExtID) | CANARD_CAN_FRAME_EFF;
-  } else {
-    frame.id = (id_flags >> 18) & MaskStdID;
-  }
-  
-  if (id_flags & (1U << 29)) {
-    frame.id |= CANARD_CAN_FRAME_RTR;
-  }
-  
-  // Get DLC
-  uint32_t dlc = (rx_mailbox->dlc_timestamp >> 16) & 0xF;
-  frame.data_len = dlc;
-  
-  // Copy data
-  uint32_t *data_ptr = (uint32_t *)frame.data;
-  for (int i = 0; i < 2; i++) {
-    data_ptr[i] = rx_mailbox->data[i];
-  }
-  
-  // Acknowledge the read
-  *fifo_ack_reg = get_index;
-  
-  // Process the frame
-  DroneCAN_handleFrame(&frame);
 }
 
 static void handleTxCompleteInterrupt(void)
 {
-  // Nothing to do in simple bootloader mode
+  /*
+    Drain the next pending frame as soon as a TX buffer empties; see
+    sys_can_stm32.c::handleTxMailboxInterrupt() for the rationale.
+    Without this the canard TX queue is only serviced from the main
+    loop's DroneCAN_update() at ~20 Hz, which throttles multi-frame
+    responses badly enough that pipelined GetSet fetches from
+    dronecan_gui_tool drop responses and time out.
+   */
+  DroneCAN_processTxQueue();
 }
 
 static void pollErrorFlagsFromISR(void)
@@ -280,9 +288,8 @@ void sys_can_enable_IRQ(void)
 */
 static bool waitForBitState(volatile uint32_t *reg, uint32_t mask, bool target_state)
 {
-  while (true) {
-    bool current_state = ((*reg) & mask) != 0;
-    if (current_state == target_state) {
+  for (volatile uint32_t tries = 0; tries < 1000000; tries++) {
+    if ((((*reg) & mask) != 0) == target_state) {
       return true;
     }
   }
@@ -383,17 +390,46 @@ static void can_init(void)
 void sys_can_init(void)
 {
   // Setup CAN RX and TX pins
-  // assumes PA11/PA12 for FDCAN1
+  // map main-firmware-style CAN pin names (from Inc/targets.h) onto FDCAN_*
+#if defined(CAN_RX_PORT) && !defined(FDCAN_RX_PORT)
+#define FDCAN_RX_PORT CAN_RX_PORT
+#define FDCAN_RX_PIN  CAN_RX_PIN
+#endif
+#if defined(CAN_TX_PORT) && !defined(FDCAN_TX_PORT)
+#define FDCAN_TX_PORT CAN_TX_PORT
+#define FDCAN_TX_PIN  CAN_TX_PIN
+#endif
+#ifndef FDCAN_RX_PORT
+#define FDCAN_RX_PORT GPIOA
+#define FDCAN_RX_PIN  LL_GPIO_PIN_11
+#endif
+#ifndef FDCAN_TX_PORT
+#define FDCAN_TX_PORT GPIOA
+#define FDCAN_TX_PIN  LL_GPIO_PIN_12
+#endif
+#ifndef FDCAN_RX_AF
+#define FDCAN_RX_AF LL_GPIO_AF_9
+#endif
+#ifndef FDCAN_TX_AF
+#define FDCAN_TX_AF LL_GPIO_AF_9
+#endif
+
   LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOA);
+  LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOB);
 
   LL_GPIO_InitTypeDef GPIO_InitStruct = {0};
-  GPIO_InitStruct.Pin = LL_GPIO_PIN_11 | LL_GPIO_PIN_12;
   GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
   GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
   GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
   GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
-  GPIO_InitStruct.Alternate = LL_GPIO_AF_9; // AF9 for FDCAN1
-  LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = FDCAN_RX_PIN;
+  GPIO_InitStruct.Alternate = FDCAN_RX_AF;
+  LL_GPIO_Init(FDCAN_RX_PORT, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = FDCAN_TX_PIN;
+  GPIO_InitStruct.Alternate = FDCAN_TX_AF;
+  LL_GPIO_Init(FDCAN_TX_PORT, &GPIO_InitStruct);
 
   can_init();
 
@@ -414,6 +450,40 @@ void set_rtc_backup_register(uint8_t idx, uint32_t value)
 {
   volatile uint32_t *bkp = &TAMP->BKP0R;
   bkp[idx] = value;
+}
+
+/*
+  drive a static port/pin as an output, used for CAN bus termination.
+  portpin is encoded as (portnum << 8) | pinnum via GPIO_PORT_PIN().
+  Ported from ../AM32/Src/DroneCAN/sys_can_stm32_CANFD.c so the bootloader
+  applies CAN_TERM_PIN identically to the main firmware.
+ */
+void setup_portpin(uint16_t portpin, bool enable)
+{
+  const uint8_t port = portpin >> 8;
+  const uint8_t pin = portpin & 0xff;
+  const uint32_t pinshift = 1U << pin;
+  GPIO_TypeDef *const ports[] = { GPIOA, GPIOB, GPIOC };
+  if (port >= sizeof(ports)/sizeof(ports[0])) {
+    return;
+  }
+  GPIO_TypeDef *pport = ports[port];
+
+  LL_AHB2_GRP1_EnableClock(1U << port);
+
+  if (enable) {
+    LL_GPIO_SetOutputPin(pport, pinshift);
+  } else {
+    LL_GPIO_ResetOutputPin(pport, pinshift);
+  }
+
+  LL_GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin = pinshift;
+  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  LL_GPIO_Init(pport, &GPIO_InitStruct);
 }
 
 #endif // DRONECAN_SUPPORT && defined(MCU_G431)

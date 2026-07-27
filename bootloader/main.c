@@ -73,6 +73,8 @@
 #endif
 
 #ifndef FIRMWARE_RELATIVE_START
+// note: DRONECAN_SUPPORT is always defined (0 or 1) by the build, so test its
+// value rather than defined(), to match the convention used elsewhere
 #if defined(MCXA153) || DRONECAN_SUPPORT
 #define FIRMWARE_RELATIVE_START 0x4000
 #else
@@ -126,6 +128,49 @@
 static uint16_t invalid_command;
 
 #include <blutil.h>
+
+// default no-op LED functions if not provided by blutil.h (USE_RGB_LED)
+#ifndef USE_RGB_LED
+static inline void bl_led_init(void) {}
+static inline void bl_led_on(void) {}
+static inline void bl_led_off(void) {}
+static inline void bl_led_red_on(void) {}
+#endif
+
+#ifdef USE_RGB_LED
+/*
+  blink RGB LEDs while stuck in the bootloader
+  - normal: blink all LEDs at ~2.5Hz
+  - error:  blink red only
+ */
+static uint16_t led_timer_start;
+static uint8_t led_blink_counter;
+static bool led_error_mode;
+
+static void __attribute__((unused)) bl_led_set_error(bool error)
+{
+  led_error_mode = error;
+}
+
+static void bl_led_update(void)
+{
+  const uint16_t now = bl_timer_us();
+  if ((uint16_t)(now - led_timer_start) < 25000U) {
+    return;
+  }
+  led_timer_start = now;
+  led_blink_counter++;
+  if (led_blink_counter & 0x08) {
+    if (led_error_mode) {
+      bl_led_red_on();
+    } else {
+      bl_led_on();
+    }
+  } else {
+    bl_led_off();
+  }
+}
+#endif // USE_RGB_LED
 
 #if DRONECAN_SUPPORT
 #include "DroneCAN/DroneCAN.h"
@@ -185,8 +230,11 @@ static uint16_t invalid_command;
   a bootloader protocol version, sent as byte 8 in the deviceInfo
   this should change when the configurator applications need to know
   about a changed feature set in the bootloader
+
+  v2: magic flash addresses (ADDRESS_MAGIC_EEPROM, ADDRESS_MAGIC_FILE_NAME) supported
+  v3: supports ADDRESS_MAGIC_DEVINFO
  */
-#define BOOTLOADER_PROTOCOL_VERSION 2
+#define BOOTLOADER_PROTOCOL_VERSION 3
 
 /*
   the devinfo structure tells the configuration client our pin code,
@@ -198,14 +246,40 @@ static uint16_t invalid_command;
 #define DEVINFO_MAGIC1 0x5925e3da
 #define DEVINFO_MAGIC2 0x4eb863d9
 
-static const struct {
+static const struct __attribute__((packed)) {
   uint32_t magic1;
   uint32_t magic2;
+  /*
+    deviceInfo bytes: '4','7','1', pin code, flash size code, 0x06, 0x06,
+    protocol version, 0x30
+   */
   const uint8_t deviceInfo[9];
+  /*
+    for (protocol version >= 3) we have additional information which can be fetched via ADDRESS_MAGIC_DEVINFO
+  */
+  uint8_t length;
+  uint8_t address_shift; // this is 2 on some MCUs
+  /*
+    the following uint16_t start addresses are the addresses that need
+    to be passed to CMD_SET_ADDRESS to get each of the respective
+    areas. Note that these are shifted addresses if address_shift is
+    non-zero. This keeps the values within the limitation of the 16
+    bit address in the protocol
+  */
+  uint16_t firmware_start;
+  uint16_t filename_start;
+  uint16_t eeprom_start;
+  uint16_t tune_start;
 } devinfo __attribute__((section(".devinfo"))) = {
   .magic1 = DEVINFO_MAGIC1,
   .magic2 = DEVINFO_MAGIC2,
-  .deviceInfo = {'4','7','1',PIN_CODE,FLASH_SIZE_CODE,0x06,0x06,BOOTLOADER_PROTOCOL_VERSION,0x30}
+  .deviceInfo = {'4','7','1',PIN_CODE,FLASH_SIZE_CODE,0x06,0x06,BOOTLOADER_PROTOCOL_VERSION,0x30},
+  sizeof(devinfo),
+  ADDRESS_SHIFT,
+  (uint16_t)(FIRMWARE_RELATIVE_START >> ADDRESS_SHIFT), // firmware_start
+  (uint16_t)((EEPROM_START_ADD - 32) >> ADDRESS_SHIFT), // filename_start
+  (uint16_t)(EEPROM_START_ADD >> ADDRESS_SHIFT), // eeprom_start
+  (uint16_t)((EEPROM_START_ADD + 48U) >> ADDRESS_SHIFT) // tune_start
 };
 
 typedef void (*pFunction)(void);
@@ -224,6 +298,16 @@ typedef void (*pFunction)(void);
 
 // magic address for continue transfer from last read
 #define ADDRESS_MAGIC_CONTINUE 0x22
+
+/*
+  magic address that maps to the devinfo structure in flash, so a
+  configuration client can READ the full deviceInfo (including the protocol
+  version and firmware start) even over a 4-way passthrough that only forwards
+  a short signature in the InitFlash reply. The read returns magic1, magic2
+  then the deviceInfo bytes, so the client can confirm support via the magic
+  values. Supported for BOOTLOADER_PROTOCOL_VERSION 3 and later.
+ */
+#define ADDRESS_MAGIC_DEVINFO 0x23
 
 
 #define CMD_RUN             0x00
@@ -245,6 +329,39 @@ static bool messagereceived;
 static int cmd;
 static int received;
 static bool initialized;
+/*
+  set whenever a validated (good-CRC, known) 4-way command is processed. While
+  set we stop polling DroneCAN, because DroneCAN_boot_ok() does a multi-ms
+  crc32 over the whole firmware that blocks the bit-banged serial and corrupts
+  4-way reads. Marking on every good command (not just the deviceInfo probe)
+  protects even a client that skips the deviceInfo handshake from the first
+  command onward. The start-bit-wait loop clears this after
+  BL_SERIAL_IDLE_THRESHOLD ticks (~10s) without a good command, so DroneCAN
+  polling resumes quickly once the client goes away - no reset required. See
+  serialreadChar(), mark_serial_active() and BL_SERIAL_IDLE_THRESHOLD.
+ */
+static bool bl_serial_active;
+#if DRONECAN_SUPPORT
+// counter of consecutive ~50ms idle ticks while bl_serial_active is set.
+// Zeroed by mark_serial_active() on every good 4-way command and by any
+// received byte, so it only climbs during true post-session silence.
+static uint16_t bl_serial_idle_count;
+// ~10 seconds of silence after the last good 4-way command before we assume the
+// client has gone and resume DroneCAN polling. Short enough for fast recovery,
+// long enough to bridge the gaps between commands in an active session.
+// 200 ticks * 50ms = 10s.
+#define BL_SERIAL_IDLE_THRESHOLD 200U
+#endif
+
+// mark that a validated 4-way command was just handled: suppress DroneCAN
+// polling for this config session and restart the idle timer.
+static void mark_serial_active(void)
+{
+  bl_serial_active = true;
+#if DRONECAN_SUPPORT
+  bl_serial_idle_count = 0;
+#endif
+}
 static uint8_t rxBuffer[258];
 static uint8_t payLoadBuffer[256];
 static uint8_t rxbyte;
@@ -327,7 +444,10 @@ static void jump()
    */
   const uint32_t *app = (uint32_t*)(MCU_FLASH_START + FIRMWARE_RELATIVE_START);
   const uint32_t ram_start = 0x20000000;
-  const uint32_t ram_limit_kb = 64;
+#ifndef RAM_LIMIT_KB
+#define RAM_LIMIT_KB 64
+#endif
+  const uint32_t ram_limit_kb = RAM_LIMIT_KB;
   const uint32_t ram_end = ram_start+ram_limit_kb*1024;
   if (app[0] < ram_start || app[0] > ram_end) {
     invalid_command = 0;
@@ -348,12 +468,16 @@ static void jump()
 #if DRONECAN_SUPPORT
   if (!DroneCAN_boot_ok()) {
     invalid_command = 0;
+#ifdef USE_RGB_LED
+    bl_led_set_error(true);
+#endif
     return;
   }
 
   sys_can_disable_IRQ();
 #endif
 
+  bl_led_off();
   jump_to_application();
 #endif
 }
@@ -411,15 +535,23 @@ static void setTransmit()
 
 static void serialwriteOneChar(uint8_t c)
 {
+#if DRONECAN_SUPPORT
+  sys_can_disable_IRQ();
+#endif
   setTransmit();
   serialwriteChar(c);
   setReceive();
+#if DRONECAN_SUPPORT
+  sys_can_enable_IRQ();
+#endif
 }
 
 static void send_ACK()
 {
   serialwriteOneChar(0x30);             // good ack!
   invalid_command = 0;
+  // an ACK is only sent for a validated command; keep DroneCAN suppressed
+  mark_serial_active();
 }
 
 static void send_BAD_ACK()
@@ -438,6 +570,9 @@ static void sendDeviceInfo()
 {
   sendString(devinfo.deviceInfo,sizeof(devinfo.deviceInfo));
   initialized = true;
+  // a config client is connected; stop DroneCAN polling so its firmware-CRC
+  // scan can't block the bit-banged serial during this session
+  mark_serial_active();
 }
 
 static bool checkAddressWritable(uint32_t address)
@@ -560,6 +695,11 @@ static void decodeInput()
     } else if (address == ADDRESS_MAGIC_CONTINUE) {
       // allow easy continue from last address, for breaking up eeprom into multiple small reads
       address = continue_address;
+    } else if (address == ADDRESS_MAGIC_DEVINFO) {
+      // config app has requested the devinfo structure (magic1, magic2,
+      // deviceInfo). Lets the client read the protocol version and firmware
+      // start over a 4-way link that doesn't forward the full deviceInfo.
+      address = (uint32_t)(uintptr_t)&devinfo;
     } else if (address < 1024) {
       // other addresses below 1024 are reserved for future magic values
       send_BAD_ACK();
@@ -584,6 +724,7 @@ static void decodeInput()
 
       return;
     }
+    mark_serial_active();
 
     // no ack with command set buffer;
     if (rxBuffer[2] == 0x01) {
@@ -605,6 +746,7 @@ static void decodeInput()
 
       return;
     }
+    mark_serial_active();
 
     serialwriteOneChar(0xC1);                // bad command message.
     return;
@@ -639,6 +781,7 @@ static void decodeInput()
 
       return;
     }
+    mark_serial_active();
 
     if (address == 0) {
       // must send SET_ADDRESS first
@@ -715,22 +858,48 @@ static bool serialreadChar()
   // now we need to wait for the start bit leading edge, which is low
   bl_timer_reset();
   while (gpio_read(input_pin)) {
-    if (bl_timer_elapsed() > 5*BITTIME) {
+    uint16_t elapsed = bl_timer_elapsed();
+    if (messagereceived && elapsed > 5*BITTIME) {
+      // we've been waiting too long, don't allow for long gaps
+      // between bytes
+#ifdef SERIAL_STATS
+      stats.no_start++;
+#endif
+      return false;
+    }
 #if DRONECAN_SUPPORT
-      if (DroneCAN_update()) {
+    // Check DroneCAN every ~50ms when waiting for first byte.
+    // DroneCAN_boot_ok() scans flash (~2-5ms per call), so we
+    // rate-limit to avoid blocking serial start-bit detection.
+    if (!messagereceived && elapsed > 50000) {
+      if (bl_serial_active) {
+        /*
+          a config client is mid-session: a good 4-way command set
+          bl_serial_active (see mark_serial_active()) so DroneCAN polling
+          stays suppressed. The idle counter is zeroed on every good command
+          and any received byte, so it only climbs during real silence. After
+          BL_SERIAL_IDLE_THRESHOLD ticks (~10s) without a command we assume the
+          client is gone and resume polling - no reset required.
+         */
+        if (++bl_serial_idle_count >= BL_SERIAL_IDLE_THRESHOLD) {
+          bl_serial_active = false;
+          bl_serial_idle_count = 0;
+        }
+      } else if (DroneCAN_update()) {
         jump();
       }
-#endif
-      if (messagereceived) {
-        // we've been waiting too long, don't allow for long gaps
-        // between bytes
-#ifdef SERIAL_STATS
-        stats.no_start++;
-#endif
-        return false;
-      }
+      bl_timer_reset();
     }
+#endif
+#ifdef USE_RGB_LED
+    bl_led_update();
+#endif
   }
+
+  // start bit detected - disable CAN IRQs to protect bit-banged timing
+#if DRONECAN_SUPPORT
+  sys_can_disable_IRQ();
+#endif
 
   // wait to get the center of bit time. We want to sample at the
   // middle of each bit
@@ -740,6 +909,9 @@ static bool serialreadChar()
     // which should still be low
 #ifdef SERIAL_STATS
     stats.bad_start++;
+#endif
+#if DRONECAN_SUPPORT
+    sys_can_enable_IRQ();
 #endif
     return false;
   }
@@ -761,11 +933,22 @@ static bool serialreadChar()
 #ifdef SERIAL_STATS
     stats.bad_stop++;
 #endif
+#if DRONECAN_SUPPORT
+    sys_can_enable_IRQ();
+#endif
     return false;
   }
 
+  // re-enable CAN IRQs after byte is complete
+#if DRONECAN_SUPPORT
+  sys_can_enable_IRQ();
+#endif
+
   // we got a good byte
   messagereceived = true;
+#if DRONECAN_SUPPORT
+  bl_serial_idle_count = 0;
+#endif
   receiveByte = rxbyte;
 #ifdef SERIAL_STATS
   stats.good++;
@@ -808,6 +991,9 @@ static void serialwriteChar(uint8_t data)
 
 static void sendString(const uint8_t *data, int len)
 {
+#if DRONECAN_SUPPORT
+  sys_can_disable_IRQ();
+#endif
   setTransmit();
   for (int i = 0; i < len; i++) {
     serialwriteChar(data[i]);
@@ -815,6 +1001,9 @@ static void sendString(const uint8_t *data, int len)
     delayMicroseconds(BITTIME);
   }
   setReceive();
+#if DRONECAN_SUPPORT
+  sys_can_enable_IRQ();
+#endif
 }
 
 static void receiveBuffer()
@@ -1227,6 +1416,7 @@ int main(void)
   bl_clock_config();
   bl_timer_init();
   bl_gpio_init();
+  bl_led_init();
 
 #ifdef BOOTLOADER_TEST_CLOCK
   test_clock();
@@ -1237,6 +1427,42 @@ int main(void)
 #ifdef BOOTLOADER_TEST_BKUP
   test_rtc_backup();
 #endif
+
+#if DRONECAN_SUPPORT
+  /*
+    If the signal pin is driven (e.g. DShot), tell DroneCAN so boot_ok() accepts
+    the jump. Must run before checkForSignal(), whose float+low path calls jump()
+    unconditionally - otherwise jump() is rejected with have_raw_command false
+    and a DShot-only boot bounces.
+
+    Prefer detect_fast_input_signal() so bidirectional DShot (idle high) is
+    recognised; fall back to a coarse "any low within ~5ms" sample for a
+    line held low without fast edges.
+  */
+  {
+    gpio_mode_set_input(input_pin, GPIO_PULL_UP);
+    delayMicroseconds(500);
+    bool has_pin_signal = detect_fast_input_signal();
+    if (!has_pin_signal) {
+      for (int i = 0; i < 500; i++) {
+        if (!gpio_read(input_pin)) {
+          has_pin_signal = true;
+          break;
+        }
+        delayMicroseconds(10);
+      }
+    }
+    if (has_pin_signal) {
+      DroneCAN_set_have_signal();
+    }
+  }
+
+  // bring CAN RX live before checkForSignal() so the no-CAN fallback window
+  // (NONCAN_FALLBACK_MS) observes the bus from boot. Return value ignored: it
+  // is false this early (no raw command, deadline not yet reached).
+  (void)DroneCAN_update();
+#endif
+
 
   checkForSignal();
 
@@ -1270,11 +1496,16 @@ int main(void)
       turn one error into several. A real flight controller drives the
       pin continuously and trips this within a few bytes regardless.
     */
-    if (invalid_command > 2 && detect_fast_input_signal()) {
+    /*
+      Skip the multi-ms DShot sample while a 4-way serial client is
+      active - same reason we pause DroneCAN: staring at the pin would
+      drop bytes mid-transfer.
+    */
+    if (!bl_serial_active && invalid_command > 2 && detect_fast_input_signal()) {
       jump();
     }
 #if DRONECAN_SUPPORT
-    if (DroneCAN_update()) {
+    if (!bl_serial_active && DroneCAN_update()) {
       jump();
     }
 #endif
