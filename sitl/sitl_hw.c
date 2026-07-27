@@ -202,6 +202,12 @@ uint8_t sitl_eeprom_byte(uint32_t index)
     return flash ? flash[SITL_EEPROM_OFFSET + index] : 0;
 }
 
+void sitl_eeprom_poke(uint32_t index, uint8_t value)
+{
+    sitl_flash_init();
+    flash[SITL_EEPROM_OFFSET + index] = value;
+}
+
 void *sitl_flash_ptr(uint32_t address, uint32_t len)
 {
     if (flash == NULL) {

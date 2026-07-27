@@ -84,15 +84,22 @@ there is anything worth booting:
   power cut during a settings write leaves a board that only a configurator
   can rescue
 - an eeprom that says **not configured** still waits for a client
-- the **version update** only runs on a software reset, and rewrites one 256
-  byte chunk rather than the whole page, which is checked by counting the
-  bytes the bootloader programs
+- the **version update** only runs on a software reset, rewrites one 256 byte
+  chunk rather than the whole page, and is skipped if settings spill past that
+  chunk — all checked by counting the bytes the bootloader programs
+- a **software reset with a DShot burst** at power up must still let the
+  version update run rather than boot straight past it
 
 ## What the tests assert
 
 A flight controller driving the pin means the ESC has to run the main
 firmware, within 500 ms of power up. Anything else means stay in the
 bootloader, answering a client if there is one.
+
+The suite is built twice. The default build models the F051/PB4 target with
+the serial client check compiled in. `make sitl_test_no_serial_client` builds
+the 4k G431 configuration with `DETECT_SERIAL_CLIENT=0`; the one case that
+needs the check is skipped there, and everything else must still hold.
 
 ## Proving the tests catch the bug
 

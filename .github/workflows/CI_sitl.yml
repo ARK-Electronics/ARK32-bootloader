@@ -17,6 +17,9 @@ jobs:
       - name: Build and run the input signal tests
         run: make sitl_test SITL_TEST_ARGS=-v
 
+      - name: Run the tests for the 4k G431 config (no serial client check)
+        run: make sitl_test_no_serial_client SITL_TEST_ARGS=-v
+
   regression_proof:
     # The same tests run against the bootloader from before the fix.
     # They have to fail, otherwise they are not testing anything.

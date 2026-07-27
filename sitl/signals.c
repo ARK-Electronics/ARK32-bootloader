@@ -112,6 +112,9 @@ bool sitl_stimulus_level(uint64_t t_ns)
     if (t_ns < stimulus.start_ns) {
         return stimulus.pre_level;
     }
+    if (stimulus.stop_ns != 0 && t_ns >= stimulus.stop_ns) {
+        return stimulus.post_level;
+    }
 
     const uint64_t t = t_ns - stimulus.start_ns + stimulus.phase_ns;
 

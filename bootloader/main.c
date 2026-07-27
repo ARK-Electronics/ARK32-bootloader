@@ -860,23 +860,15 @@ static void receiveBuffer()
 }
 
 #ifdef UPDATE_EEPROM_ENABLE
-// save_flash_nolib may not support writes larger than this
-#define EEPROM_CHUNK_SIZE 256
-
 /*
-  Updating the version means erasing the whole eeprom page and writing
-  it back, and there is no second page to stage a copy in, so for as
-  long as that takes the settings exist only in ram. Three things stop
-  that from being a board that comes back wrong:
+  Updating the version means erasing the eeprom and writing it back,
+  and there is no second page to stage a copy in, so for as long as
+  that takes the settings exist only in ram. Two things stop that from
+  being a board that comes back wrong:
 
   - it only runs on a software reset, which in practice means the user
     asked the firmware to enter the bootloader, so the board is on a
     bench rather than in the air
-  - only the first chunk is rewritten. The page erase leaves the rest
-    at 0xFF, which is what it already was, so the programming half of
-    the window is a quarter of what it would be. If anything is
-    stored past the first chunk we leave the version alone rather
-    than put the settings at risk to update a version byte
   - if power is lost anyway, jump() still boots a blank eeprom, so the
     board runs its firmware on defaults instead of stopping
  */
@@ -897,19 +889,49 @@ static void update_EEPROM()
     return;
   }
 
-  for (uint32_t i = EEPROM_CHUNK_SIZE; i < EEPROM_MAX_SIZE; i++) {
+  // update only the bootloader version, preserve every other byte
+  uint8_t data[EEPROM_MAX_SIZE];
+  memcpy(data, eeprom, EEPROM_MAX_SIZE);
+  data[2] = BOOTLOADER_VERSION;
+
+#ifdef NXP
+  /*
+    the NXP driver erases a whole 8k flash sector per write regardless
+    of length, so there is nothing to gain by writing less than the
+    whole region, and EEPROM_MAX_SIZE need not be chunk aligned here.
+  */
+  save_flash_nolib(data, EEPROM_MAX_SIZE, EEPROM_START_ADD);
+#else
+  /*
+    On the STM32 style driver the write erases one page and programs
+    it back a halfword at a time, so the settings are exposed for the
+    length of that write. Rewrite only the first chunk, which is where
+    AM32 keeps its settings: the erase leaves the rest of the page at
+    0xFF, which is what it already was, so the programming part of the
+    window shrinks to a quarter. save_flash_nolib() may also not accept
+    a write larger than one chunk.
+
+    That is only lossless if nothing is stored past the first chunk. If
+    something is, leave the version alone rather than destroy settings
+    for a version byte. The skip is silent: such a unit keeps its old
+    version and reads back like one that was never updated. AM32 keeps
+    its settings well inside the first chunk, so this does not arise in
+    practice, but it is worth knowing when reading a version byte in
+    the field.
+  */
+  #define EEPROM_UPDATE_SIZE 256
+  _Static_assert(EEPROM_MAX_SIZE >= EEPROM_UPDATE_SIZE,
+                 "eeprom region smaller than one update chunk");
+
+  for (uint32_t i = EEPROM_UPDATE_SIZE; i < EEPROM_MAX_SIZE; i++) {
     if (eeprom[i] != 0xFF) {
       return;
     }
   }
 
-  // update only the bootloader version, preserve every other byte
-  uint8_t data[EEPROM_CHUNK_SIZE];
-  memcpy(data, eeprom, EEPROM_CHUNK_SIZE);
-  data[2] = BOOTLOADER_VERSION;
-
   // this write is also what erases the page, so it has to come last
-  save_flash_nolib(data, EEPROM_CHUNK_SIZE, EEPROM_START_ADD);
+  save_flash_nolib(data, EEPROM_UPDATE_SIZE, EEPROM_START_ADD);
+#endif
 }
 #endif // UPDATE_EEPROM_ENABLE
 
@@ -1055,10 +1077,22 @@ static void checkForSignal()
     firmware. The level based checks below cannot see an inverted
     (bidirectional) DShot signal, as that idles high and so looks the
     same as a bootloader client holding the line high.
+
+    Skipped on a software reset for the same reason the level checks
+    are (see below): a software reset generally means the firmware
+    asked to stay in the bootloader, and we must let update_EEPROM()
+    run. A board that really is being driven with DShot still recovers
+    through the main loop detector, which is not gated this way.
   */
+#if CHECK_SOFTWARE_RESET
+  if (!bl_was_software_reset() && detect_fast_input_signal()) {
+    jump();
+  }
+#else
   if (detect_fast_input_signal()) {
     jump();
   }
+#endif
 
   for (int i = 0 ; i < pull_down_pin_count_interations ; i ++) {
     if (!gpio_read(input_pin)) {
@@ -1113,8 +1147,21 @@ static void checkForSignal()
     delayMicroseconds(10);
   }
 
+  /*
+    floating and low at least once - jump to application, unless the
+    line is actually a client sending to us.
+
+    detect_serial_framing() reads a steadily high line as a run of stop
+    bits, so a floating pin that took one low glitch and then sat high
+    now stays in the bootloader where before it would boot. That is the
+    safe direction on purpose: with no flight controller attached there
+    are no motors to leave unspun, and the main loop still boots the
+    firmware once a real signal appears. Booting on a noise glitch is
+    the worse outcome. This bias is best confirmed on hardware with a
+    floating-pin power up, which the SITL suite cannot model faithfully.
+  */
   if (low_pin_count > 0 && !detect_serial_framing()) {
-    jump();		// floating & low at least once - jump to application
+    jump();
   }
 }
 
@@ -1216,8 +1263,14 @@ int main(void)
       bidirectional DShot as that leaves the line idle high while the
       flight controller boots. Once we start failing to decode bytes,
       check whether that is because a fast signal has appeared.
+
+      Gated a little above zero so a single bad CRC in an otherwise
+      healthy configurator session does not spend 2ms staring at the
+      pin, which would drop the bytes arriving during that window and
+      turn one error into several. A real flight controller drives the
+      pin continuously and trips this within a few bytes regardless.
     */
-    if (invalid_command > 0 && detect_fast_input_signal()) {
+    if (invalid_command > 2 && detect_fast_input_signal()) {
       jump();
     }
 #if DRONECAN_SUPPORT

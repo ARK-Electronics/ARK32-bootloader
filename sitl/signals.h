@@ -43,6 +43,8 @@ typedef struct {
     uint64_t start_ns; /* when the source starts driving the waveform */
     bool pre_level;    /* level the line sits at before start_ns */
     uint64_t phase_ns; /* phase offset into the waveform */
+    uint64_t stop_ns;  /* 0, or when the source stops and holds post_level */
+    bool post_level;   /* level the line sits at after stop_ns */
 } sitl_stimulus_t;
 
 void sitl_set_stimulus(const sitl_stimulus_t *stim);

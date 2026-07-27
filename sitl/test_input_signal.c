@@ -51,15 +51,18 @@ typedef struct {
     uint64_t start_ns;       /* when the source starts driving */
     uint64_t start_sweep_ns; /* spread start_ns over this much */
     bool pre_level;          /* level the line sits at before that */
+    uint64_t stop_ns;        /* 0, or when the source stops driving */
+    bool post_level;         /* level the line holds after stop_ns */
     sitl_outcome_t expect;
-    bool expect_devinfo; /* must also answer a configurator */
-    bool known_fail;     /* pre-existing behaviour, reported not enforced */
+    bool expect_devinfo;       /* must also answer a configurator */
+    bool needs_serial_client;  /* only meaningful with the framing check compiled in */
 
     /* the state the board powers up in */
     bool software_reset;
     bool set_eeprom_byte0;  /* otherwise the board is configured, 0x01 */
     uint8_t eeprom_byte0;
     uint8_t eeprom_version; /* 0 means the default of 18 */
+    bool eeprom_spill;      /* place a settings byte past the first chunk */
 
     /* checks on what the bootloader did to the eeprom page */
     bool check_eeprom;
@@ -196,6 +199,10 @@ static const test_case_t cases[] = {
         .name = "UART client already talking",
         .wave = &sig_uart_bl_repeat,
         .expect = SITL_TIMEOUT,
+        // without the framing check (4k G431) this is the pre-existing
+        // phase-dependent behaviour, with no single right answer, so it
+        // is only asserted on targets that compile the check in
+        .needs_serial_client = true,
         .why = "a client sending at power up must not be read as a low pin",
     },
 
@@ -260,6 +267,43 @@ static const test_case_t cases[] = {
         .expect_flash_bytes = 0,
         .why = "only a software reset may touch the settings",
     },
+    {
+        .name = "eeprom settings past first chunk",
+        .wave = &sig_idle_high,
+        .software_reset = true,
+        .eeprom_version = 18,
+        .eeprom_spill = true,
+        .expect = SITL_TIMEOUT,
+        .check_eeprom = true,
+        .expect_version = 18,
+        .expect_flash_bytes = 0,
+        .why = "settings past the first chunk block the update rather than risk them",
+    },
+
+    /*
+      A short DShot burst at power up on a software reset, then the line
+      goes idle high. Only the fast detector at the top of
+      checkForSignal() can see the burst; by the time the level phases
+      run the line is quiet, so they decide to stay. If that top
+      detector jumps on a software reset it boots immediately and skips
+      update_EEPROM(), so the version byte never records the fix. Guarded
+      correctly, the burst is ignored, update_EEPROM() runs, and we wait.
+      This is the case the finding-1 guard exists for.
+    */
+    {
+        .name = "software reset, DShot burst",
+        .wave = &sig_dshot600_bidir_8k,
+        .software_reset = true,
+        .pre_level = true,
+        .stop_ns = 4 * 1000000ULL,
+        .post_level = true,
+        .eeprom_version = 18,
+        .expect = SITL_TIMEOUT,
+        .check_eeprom = true,
+        .expect_version = BOOTLOADER_VERSION,
+        .expect_flash_bytes = 256,
+        .why = "the top fast detector must not boot past update_EEPROM() on a soft reset",
+    },
 };
 
 #define NUM_CASES (sizeof(cases) / sizeof(cases[0]))
@@ -320,12 +364,17 @@ static bool run_child(const test_case_t *tc, const sitl_cpu_speed_t *speed,
             .start_ns = start_ns,
             .pre_level = tc->pre_level,
             .phase_ns = phase_ns,
+            .stop_ns = tc->stop_ns,
+            .post_level = tc->post_level,
         };
         sitl_set_stimulus(&stim);
         sitl_set_cpu_speed(speed);
         sitl_set_boot_state(tc->software_reset,
                             tc->set_eeprom_byte0 ? tc->eeprom_byte0 : 0x01,
                             tc->eeprom_version ? tc->eeprom_version : 18);
+        if (tc->eeprom_spill) {
+            sitl_eeprom_poke(300, 0xAB);
+        }
 
         run_result_t r;
         memset(&r, 0, sizeof(r));
@@ -407,10 +456,19 @@ int main(int argc, char **argv)
            "--------------", "--------", "------");
 
     unsigned failed = 0;
-    unsigned known_failed = 0;
 
     for (size_t c = 0; c < NUM_CASES; c++) {
         const test_case_t *tc = &cases[c];
+
+#if !DETECT_SERIAL_CLIENT
+        if (tc->needs_serial_client) {
+            printf("  %-28s %-14s %-8s %s\n", tc->name,
+                   tc->expect == SITL_JUMPED ? "booted app" : "in bootloader", "SKIP",
+                   "framing check not compiled on this target");
+            continue;
+        }
+#endif
+
         const uint64_t period = sitl_waveform_period_ns(tc->wave);
         const bool sweep = period > 0 || tc->start_sweep_ns > 0;
         const unsigned n_phases = sweep ? NUM_PHASES : 1;
@@ -470,9 +528,6 @@ int main(int argc, char **argv)
         const char *verdict;
         if (bad == 0) {
             verdict = "PASS";
-        } else if (tc->known_fail) {
-            verdict = "XFAIL";
-            known_failed++;
         } else {
             verdict = "FAIL";
             failed++;
@@ -495,10 +550,6 @@ int main(int argc, char **argv)
     }
 
     printf("\n");
-    if (known_failed > 0) {
-        printf("%u known failure%s (pre-existing, not enforced)\n", known_failed,
-               known_failed == 1 ? "" : "s");
-    }
     if (failed > 0) {
         printf("FAILED: %u of %zu signals give the wrong boot decision\n", failed, NUM_CASES);
         return 1;

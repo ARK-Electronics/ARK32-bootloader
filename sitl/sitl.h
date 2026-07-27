@@ -80,6 +80,9 @@ void sitl_set_boot_state(bool software_reset, uint8_t eeprom_byte0,
                          uint8_t eeprom_version);
 bool sitl_was_software_reset(void);
 
+/* write a single eeprom byte, e.g. to place settings past the first chunk */
+void sitl_eeprom_poke(uint32_t index, uint8_t value);
+
 /* how much of the eeprom page the bootloader rewrote */
 unsigned sitl_flash_write_count(void);
 uint32_t sitl_flash_written_bytes(void);
