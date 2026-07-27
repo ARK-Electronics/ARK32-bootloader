@@ -32,10 +32,13 @@ MACOS_TOOLS := https://firmware.ardupilot.org/Tools/AM32-tools/macos-tools.tar.g
 
 ifeq ($(OS),Windows_NT)
 
-# Windows recipes run under cmd.exe (see tools.mk SHELL). Use PowerShell only.
+# Windows recipes run under cmd.exe (see tools.mk SHELL).
+# Hash with .NET SHA256 rather than Get-FileHash: some Windows runners
+# resolve to a PowerShell host where that cmdlet is missing, which left
+# $got empty and failed the checksum check in CI Build Windows.
 arm_sdk_install:
 	@echo Installing windows tools
-	@powershell -NoProfile -Command "\
+	@powershell -NoProfile -ExecutionPolicy Bypass -Command "\
 		if (-not (Test-Path 'tools/windows/make/bin/make.exe')) { \
 			Write-Host 'downloading windows-tools.zip (make utilities, riscv, openocd)'; \
 			(New-Object System.Net.WebClient).DownloadFile('$(WINDOWS_TOOLS)', 'windows-tools.zip'); \
@@ -48,8 +51,16 @@ arm_sdk_install:
 				'$(XPACK_GCC_REL)/xpack-arm-none-eabi-gcc-$(XPACK_GCC_VER)-win32-x64.zip', \
 				'xpack-gcc-win.zip'); \
 			$$want = '$(XPACK_SHA_win32-x64)'; \
-			$$got = (Get-FileHash -Algorithm SHA256 xpack-gcc-win.zip).Hash.ToLower(); \
+			$$fs = [System.IO.File]::OpenRead((Resolve-Path 'xpack-gcc-win.zip')); \
+			$$sha = [System.Security.Cryptography.SHA256]::Create(); \
+			try { \
+				$$got = [BitConverter]::ToString($$sha.ComputeHash($$fs)).Replace('-','').ToLowerInvariant(); \
+			} finally { \
+				$$fs.Dispose(); \
+				$$sha.Dispose(); \
+			}; \
 			if ($$got -ne $$want) { throw \"xpack gcc checksum mismatch: got $$got want $$want\"; }; \
+			Write-Host 'checksum ok'; \
 			Write-Host 'unpacking xpack gcc into tools/windows/'; \
 			New-Item -ItemType Directory -Force -Path tools/windows | Out-Null; \
 			Expand-Archive -Path xpack-gcc-win.zip -Force -DestinationPath tools/windows; \

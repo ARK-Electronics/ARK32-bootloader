@@ -235,11 +235,14 @@ static const test_case_t cases[] = {
     },
 
     /* ---- the version update must keep the page rewrite small ---- */
+    /* eeprom_version 17 is any stale value != BOOTLOADER_VERSION (and
+       not blank). Keeps the rewrite path covered without requiring a
+       version bump in Inc/version.h. */
     {
         .name = "eeprom version update",
         .wave = &sig_idle_high,
         .software_reset = true,
-        .eeprom_version = 18,
+        .eeprom_version = 17,
         .expect = SITL_TIMEOUT,
         .check_eeprom = true,
         .expect_version = BOOTLOADER_VERSION,
@@ -260,10 +263,10 @@ static const test_case_t cases[] = {
     {
         .name = "eeprom update, power on reset",
         .wave = &sig_idle_high,
-        .eeprom_version = 18,
+        .eeprom_version = 17,
         .expect = SITL_TIMEOUT,
         .check_eeprom = true,
-        .expect_version = 18,
+        .expect_version = 17,
         .expect_flash_bytes = 0,
         .why = "only a software reset may touch the settings",
     },
@@ -271,11 +274,11 @@ static const test_case_t cases[] = {
         .name = "eeprom settings past first chunk",
         .wave = &sig_idle_high,
         .software_reset = true,
-        .eeprom_version = 18,
+        .eeprom_version = 17,
         .eeprom_spill = true,
         .expect = SITL_TIMEOUT,
         .check_eeprom = true,
-        .expect_version = 18,
+        .expect_version = 17,
         .expect_flash_bytes = 0,
         .why = "settings past the first chunk block the update rather than risk them",
     },
@@ -297,7 +300,7 @@ static const test_case_t cases[] = {
         .pre_level = true,
         .stop_ns = 4 * 1000000ULL,
         .post_level = true,
-        .eeprom_version = 18,
+        .eeprom_version = 17,
         .expect = SITL_TIMEOUT,
         .check_eeprom = true,
         .expect_version = BOOTLOADER_VERSION,
