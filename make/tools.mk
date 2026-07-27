@@ -1,6 +1,6 @@
 ###############################################################
 #
-# Installers for tools
+# Host tools (Linux only)
 #
 ###############################################################
 
@@ -9,61 +9,17 @@
 XPACK_GCC_VER := 15.2.1-1.1
 XPACK_GCC_DIR := xpack-arm-none-eabi-gcc-$(XPACK_GCC_VER)
 
-ifeq ($(MSYSTEM),UCRT64)
-OSDIR:=windows
-ARM_SDK_PREFIX:=tools/windows/$(XPACK_GCC_DIR)/bin/arm-none-eabi-
-CP:=cp
-DSEP:=/
-NUL:=/dev/null
-MKDIR:=mkdir
-RM:=rm
-CUT:=cut
-FGREP:=fgrep
-else
-
-ifeq ($(OS),Windows_NT)
-OSDIR:=windows
-ARM_SDK_PREFIX:=tools/windows/$(XPACK_GCC_DIR)/bin/arm-none-eabi-
-SHELL:=cmd.exe
-CP:=tools\\windows\\make\\bin\\cp
-DSEP:=\\
-NUL:=NUL
-MKDIR:=tools\\windows\\make\\bin\\mkdir
-RM:=tools\\windows\\make\\bin\\rm
-CUT:=tools\\windows\\make\\bin\\cut
-FGREP:=tools\\windows\\make\\bin\\fgrep
-
-else
-# MacOS and Linux
-UNAME_S := $(shell uname -s)
-ifeq ($(UNAME_S),Darwin)
-OSDIR:=macos
-ARM_SDK_PREFIX:=tools/macos/$(XPACK_GCC_DIR)/bin/arm-none-eabi-
-CP:=cp
-DSEP:=/
-NUL:=/dev/null
-MKDIR:=mkdir
-RM:=rm
-CUT:=cut
-FGREP:=fgrep
-# no toolchain for building V203 on MacOS
-MCU_NOBUILD:=V203
-else
-# assume Linux
-OSDIR:=linux
-ARM_SDK_PREFIX:=tools/linux/$(XPACK_GCC_DIR)/bin/arm-none-eabi-
-CP:=cp
-DSEP:=/
-NUL:=/dev/null
-MKDIR:=mkdir
-RM:=rm
-CUT:=cut
-FGREP:=fgrep
-endif
-endif
-endif
+# Builds and arm_sdk_install support Linux only.
+OSDIR := linux
+ARM_SDK_PREFIX := tools/linux/$(XPACK_GCC_DIR)/bin/arm-none-eabi-
+CP := cp
+DSEP := /
+NUL := /dev/null
+MKDIR := mkdir
+RM := rm
+CUT := cut
+FGREP := fgrep
 
 # workaround for lack of a lowercase function in GNU make
 # look away before this sends you blind ....
 lc = $(subst A,a,$(subst B,b,$(subst C,c,$(subst D,d,$(subst E,e,$(subst F,f,$(subst G,g,$(subst H,h,$(subst I,i,$(subst J,j,$(subst K,k,$(subst L,l,$(subst M,m,$(subst N,n,$(subst O,o,$(subst P,p,$(subst Q,q,$(subst R,r,$(subst S,s,$(subst T,t,$(subst U,u,$(subst V,v,$(subst W,w,$(subst X,x,$(subst Y,y,$(subst Z,z,$1))))))))))))))))))))))))))
-

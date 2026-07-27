@@ -74,19 +74,9 @@ $(foreach MCU,$(MCU_TYPES),$(eval SVD_$(MCU) := $(wildcard $(HAL_FOLDER_$(MCU))/
 .PHONY : clean all
 all : check_tools bootloaders
 
-# Check if tools are installed
+# Check if tools are installed (Linux only; see make/tools.mk)
 check_tools:
-ifeq ($(MSYSTEM),UCRT64)
 	@$(SHELL) -c 'command -v $(CC) >/dev/null 2>&1 || { echo "Error: please install tools first with target arm_sdk_install."; exit 1; }'
-else
-ifeq ($(OS),Windows_NT)
-	@if not exist "$(CC).exe" ( \
-		echo Error: please install tools first with target arm_sdk_install. & exit /B 1 \
-	)
-else
-	@$(SHELL) -c 'command -v $(CC) >/dev/null 2>&1 || { echo "Error: please install tools first with target arm_sdk_install."; exit 1; }'
-endif
-endif
 
 clean :
 	@echo Removing $(OBJ) directory
