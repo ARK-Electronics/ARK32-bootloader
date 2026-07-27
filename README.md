@@ -6,11 +6,13 @@ This is the bootloader for the AM32 project
 Installing Build Tools
 ----------------------
 
-To install the required build tools please run the script for your
-operating system found in the env_setup_scripts directory. This will
-download the required tools from
-https://firmware.ardupilot.org/Tools/AM32-tools/ and unpack them in
-tools. It will also setup your vscode settings for your OS.
+Building is supported on Linux only. To install the required build
+tools run env_setup_scripts/gcc_setup_linux.sh, or run "make
+arm_sdk_install" directly. This downloads the pinned xPack GCC Arm
+toolchain from its GitHub release (verified against a SHA256 pinned
+in make/tools_install.mk) plus the legacy AM32-tools archive for the
+V203 RISC-V toolchain and openocd, and unpacks them in tools. The
+script also copies the Linux vscode settings into place.
 
 Runing VSCode
 -------------
