@@ -37,3 +37,9 @@ SRC_DIR_DRONECAN_$(MCU) += bootloader/DroneCAN \
 		bootloader/DroneCAN/libcanard
 
 SRC_DRONECAN_$(MCU) := $(foreach dir,$(SRC_DIR_DRONECAN_$(MCU)),$(wildcard $(dir)/*.[cs]))
+
+# The 4k bootloader region on G431 is full. The check for a bootloader
+# client that is already sending at power up does not fit, so it is
+# left out of these builds. The DroneCAN build links against a 16k
+# region and keeps it.
+CFLAGS_4K_$(MCU) := -DDETECT_SERIAL_CLIENT=0

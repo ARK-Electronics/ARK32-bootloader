@@ -55,6 +55,17 @@
  */
 #define UPDATE_EEPROM_ENABLE 1
 
+/*
+  should checkForSignal() look for a bootloader client that is already
+  sending when we power up? Without this the level checks read 19200
+  traffic as a pin that has been pulled low and boot the application
+  instead of answering. Targets with no room left in a 4k bootloader
+  region turn it off in their makefile.
+ */
+#ifndef DETECT_SERIAL_CLIENT
+#define DETECT_SERIAL_CLIENT 1
+#endif
+
 #include <string.h>
 
 #ifndef MCU_FLASH_START
@@ -294,7 +305,18 @@ static void jump()
 #else
   uint8_t value = *(uint8_t*)(EEPROM_START_ADD);
 #endif
-  if (value != 0x01) {      // check first byte of eeprom to see if its programmed, if not do not jump
+  /*
+    byte 0 of the eeprom is set to 0x01 once the settings have been
+    written, so a different value means the board has not been
+    configured. A blank byte is the exception: that is either a board
+    that has never been configured or an update_EEPROM() that lost
+    power during the page erase, and in both cases there can still be
+    perfectly good firmware in flash. The application header checks
+    below are what actually prove that, so refusing on a blank byte
+    only serves to trap a working board in the bootloader with no way
+    out except a configurator.
+  */
+  if (value != 0x01 && value != 0xFF) {
     invalid_command = 0;
     return;
   }
@@ -838,6 +860,18 @@ static void receiveBuffer()
 }
 
 #ifdef UPDATE_EEPROM_ENABLE
+/*
+  Updating the version means erasing the eeprom and writing it back,
+  and there is no second page to stage a copy in, so for as long as
+  that takes the settings exist only in ram. Two things stop that from
+  being a board that comes back wrong:
+
+  - it only runs on a software reset, which in practice means the user
+    asked the firmware to enter the bootloader, so the board is on a
+    bench rather than in the air
+  - if power is lost anyway, jump() still boots a blank eeprom, so the
+    board runs its firmware on defaults instead of stopping
+ */
 static void update_EEPROM()
 {
   if (!bl_was_software_reset()) {
@@ -851,37 +885,181 @@ static void update_EEPROM()
 #else
   const uint8_t *eeprom = (const uint8_t *)EEPROM_START_ADD;
 #endif
-  if (BOOTLOADER_VERSION != eeprom[2]) {
-    if (eeprom[2] == 0xFF || eeprom[2] == 0x00) {
-      return;
-    }
+  if (BOOTLOADER_VERSION == eeprom[2] || eeprom[2] == 0xFF || eeprom[2] == 0x00) {
+    return;
+  }
 
-    // update only the bootloader version, preserve all other bytes up to EEPROM_MAX_SIZE
-    uint8_t data[EEPROM_MAX_SIZE];
-	memcpy(data, eeprom, EEPROM_MAX_SIZE);
-	data[2] = BOOTLOADER_VERSION;
+  // update only the bootloader version, preserve every other byte
+  uint8_t data[EEPROM_MAX_SIZE];
+  memcpy(data, eeprom, EEPROM_MAX_SIZE);
+  data[2] = BOOTLOADER_VERSION;
 
 #ifdef NXP
-    uint8_t *p = &data[0];
-
-    save_flash_nolib(p, EEPROM_MAX_SIZE, EEPROM_START_ADD);
+  /*
+    the NXP driver erases a whole 8k flash sector per write regardless
+    of length, so there is nothing to gain by writing less than the
+    whole region, and EEPROM_MAX_SIZE need not be chunk aligned here.
+  */
+  save_flash_nolib(data, EEPROM_MAX_SIZE, EEPROM_START_ADD);
 #else
-    // flash in 256 byte chunks as save_flash_nolib may not support larger chunks
-    uint32_t remaining = EEPROM_MAX_SIZE;
-    uint32_t addr = EEPROM_START_ADD;
-    const uint8_t *p = &data[0];
+  /*
+    On the STM32 style driver the write erases one page and programs
+    it back a halfword at a time, so the settings are exposed for the
+    length of that write. Rewrite only the first chunk, which is where
+    AM32 keeps its settings: the erase leaves the rest of the page at
+    0xFF, which is what it already was, so the programming part of the
+    window shrinks to a quarter. save_flash_nolib() may also not accept
+    a write larger than one chunk.
 
-    while (remaining > 0) {
-      const uint32_t chunk = 256;
-      save_flash_nolib(p, chunk, addr);
-      p += chunk;
-      addr += chunk;
-      remaining -= chunk;
+    That is only lossless if nothing is stored past the first chunk. If
+    something is, leave the version alone rather than destroy settings
+    for a version byte. The skip is silent: such a unit keeps its old
+    version and reads back like one that was never updated. AM32 keeps
+    its settings well inside the first chunk, so this does not arise in
+    practice, but it is worth knowing when reading a version byte in
+    the field.
+  */
+  #define EEPROM_UPDATE_SIZE 256
+  _Static_assert(EEPROM_MAX_SIZE >= EEPROM_UPDATE_SIZE,
+                 "eeprom region smaller than one update chunk");
+
+  for (uint32_t i = EEPROM_UPDATE_SIZE; i < EEPROM_MAX_SIZE; i++) {
+    if (eeprom[i] != 0xFF) {
+      return;
     }
-#endif
   }
+
+  // this write is also what erases the page, so it has to come last
+  save_flash_nolib(data, EEPROM_UPDATE_SIZE, EEPROM_START_ADD);
+#endif
 }
 #endif // UPDATE_EEPROM_ENABLE
+
+/*
+  the shortest pulse a 19200 baud bootloader UART can produce is one
+  bit time, so anything much shorter than that cannot be bootloader
+  traffic
+ */
+#define FAST_SIGNAL_MAX_PULSE_US (BITTIME/2)
+
+// number of short pulses needed before we declare a fast signal
+#define FAST_SIGNAL_MIN_PULSES 8
+
+/*
+  how long to watch the pin for. The slowest DShot rate a flight
+  controller will use repeats well inside this window
+ */
+#define FAST_SIGNAL_WINDOW_US 2000
+
+/*
+  detect a fast digital signal on the input pin
+
+  DShot, bidirectional DShot, Multishot and Oneshot all contain pulses
+  far shorter than one 19200 baud bit time. If we see enough of them
+  then a flight controller is driving the pin and we should be running
+  the main firmware rather than sitting in the bootloader.
+
+  This has to be done with edge timing rather than by sampling the pin
+  level. Normal DShot idles low, but bidirectional DShot idles high,
+  which is indistinguishable from an idle bootloader UART if you only
+  look at levels.
+ */
+static bool detect_fast_input_signal(void)
+{
+  uint8_t short_pulses = 0;
+  bool last_level = gpio_read(input_pin);
+  uint16_t last_edge = 0;
+
+  bl_timer_reset();
+
+  while (bl_timer_elapsed() < FAST_SIGNAL_WINDOW_US) {
+    const bool level = gpio_read(input_pin);
+    if (level == last_level) {
+      continue;
+    }
+    last_level = level;
+
+    const uint16_t now = bl_timer_elapsed();
+    if (now - last_edge < FAST_SIGNAL_MAX_PULSE_US &&
+        ++short_pulses >= FAST_SIGNAL_MIN_PULSES) {
+      return true;
+    }
+    last_edge = now;
+  }
+
+  return false;
+}
+
+/*
+  look for 19200 framing on the input pin
+
+  A bootloader client that is already sending when we power up holds
+  the line low for most of every byte, and the level checks in
+  checkForSignal() read that as a pin that has been pulled low, so we
+  boot the firmware instead of answering. Framing tells the two apart:
+  take a falling edge as a start bit and check that the stop bit of
+  that byte and of the several after it all land high on the 19200
+  grid.
+
+  Being wrong in the direction of staying here is cheap. If an input
+  protocol happens to fool this, the main loop boots the firmware a
+  few ms later through detect_fast_input_signal() or the invalid
+  command count. Being wrong the other way is what leaves a board that
+  cannot be flashed.
+ */
+#if DETECT_SERIAL_CLIENT
+static bool detect_serial_framing(void)
+{
+  for (uint8_t tries = 0; tries < 8; tries++) {
+    bool was_high = false;
+    bool falling_edge = false;
+
+    bl_timer_reset();
+    while (bl_timer_elapsed() < 20U*BITTIME) {
+      if (gpio_read(input_pin)) {
+        was_high = true;
+      } else if (was_high) {
+        falling_edge = true;
+        break;
+      }
+    }
+
+    if (!falling_edge) {
+      return false;		// nothing is switching, so nothing is sending
+    }
+
+    /*
+      Treat the edge as a start bit and look for a run of stop bits
+      on the 19200 grid, never resyncing. A client sends its packet
+      back to back, so every tenth bit from here has to be high.
+
+      The run has to be several bytes long. Oneshot125 repeats every
+      500us against a byte time of 520us, so it lines up with one or
+      two stop bits often enough to matter, but 20us of drift per
+      byte pulls it off the grid before the run is done.
+
+      Picking the signal up mid byte lands on a data bit rather than
+      a start bit, which is what the retries are for.
+    */
+    uint8_t stop_bits = 0;
+
+    delayMicroseconds(9U*BITTIME + HALFBITTIME);
+    while (gpio_read(input_pin)) {
+      if (++stop_bits >= 5) {
+        return true;
+      }
+      delayMicroseconds(10U*BITTIME);
+    }
+  }
+
+  return false;
+}
+#else
+static bool detect_serial_framing(void)
+{
+  return false;
+}
+#endif // DETECT_SERIAL_CLIENT
 
 #define low_pin_count_threshold 450		// count signal pin is low before determining jump to main firmware
 #define pull_down_pin_count_interations 4000		// greater interations extend grace period for input devices booting with signal pin high
@@ -892,6 +1070,29 @@ static void checkForSignal()
   gpio_mode_set_input(input_pin, GPIO_PULL_DOWN);
 
   delayMicroseconds(500);
+
+  /*
+    if a fast signal is already being driven onto the pin then a
+    flight controller is talking to us and we should boot the main
+    firmware. The level based checks below cannot see an inverted
+    (bidirectional) DShot signal, as that idles high and so looks the
+    same as a bootloader client holding the line high.
+
+    Skipped on a software reset for the same reason the level checks
+    are (see below): a software reset generally means the firmware
+    asked to stay in the bootloader, and we must let update_EEPROM()
+    run. A board that really is being driven with DShot still recovers
+    through the main loop detector, which is not gated this way.
+  */
+#if CHECK_SOFTWARE_RESET
+  if (!bl_was_software_reset() && detect_fast_input_signal()) {
+    jump();
+  }
+#else
+  if (detect_fast_input_signal()) {
+    jump();
+  }
+#endif
 
   for (int i = 0 ; i < pull_down_pin_count_interations ; i ++) {
     if (!gpio_read(input_pin)) {
@@ -904,6 +1105,9 @@ static void checkForSignal()
     }
   }
   if (low_pin_count > low_pin_count_threshold) {		// pulled low & majority stayed low - jump to application
+    if (detect_serial_framing()) {
+      return;		// a client is sending to us, the pin is not pulled low
+    }
 #if CHECK_SOFTWARE_RESET
     if (!bl_was_software_reset()) {
       jump();
@@ -943,8 +1147,21 @@ static void checkForSignal()
     delayMicroseconds(10);
   }
 
-  if (low_pin_count > 0) {
-    jump();		// floating & low at least once - jump to application
+  /*
+    floating and low at least once - jump to application, unless the
+    line is actually a client sending to us.
+
+    detect_serial_framing() reads a steadily high line as a run of stop
+    bits, so a floating pin that took one low glitch and then sat high
+    now stays in the bootloader where before it would boot. That is the
+    safe direction on purpose: with no flight controller attached there
+    are no motors to leave unspun, and the main loop still boots the
+    firmware once a real signal appears. Booting on a noise glitch is
+    the worse outcome. This bias is best confirmed on hardware with a
+    floating-pin power up, which the SITL suite cannot model faithfully.
+  */
+  if (low_pin_count > 0 && !detect_serial_framing()) {
+    jump();
   }
 }
 
@@ -1037,6 +1254,23 @@ int main(void)
     receiveBuffer();
 
     if (invalid_command > 100) {
+      jump();
+    }
+
+    /*
+      the flight controller may only start driving the pin after we
+      have finished checkForSignal(), which is common with
+      bidirectional DShot as that leaves the line idle high while the
+      flight controller boots. Once we start failing to decode bytes,
+      check whether that is because a fast signal has appeared.
+
+      Gated a little above zero so a single bad CRC in an otherwise
+      healthy configurator session does not spend 2ms staring at the
+      pin, which would drop the bytes arriving during that window and
+      turn one error into several. A real flight controller drives the
+      pin continuously and trips this within a few bytes regardless.
+    */
+    if (invalid_command > 2 && detect_fast_input_signal()) {
       jump();
     }
 #if DRONECAN_SUPPORT

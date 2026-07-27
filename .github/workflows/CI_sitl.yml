@@ -1,0 +1,40 @@
+name: Input signal tests
+
+on: [push, pull_request]
+
+env:
+  # The bootloader as it was before DShot detection was added. The
+  # regression_proof job checks that these tests still catch that bug,
+  # so this must stay pinned to a pre-fix commit.
+  PRE_FIX_COMMIT: 8a53777b4bb57231e364bd23c893b4c156020579
+
+jobs:
+  input_signals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run the input signal tests
+        run: make sitl_test SITL_TEST_ARGS=-v
+
+      - name: Run the tests for the 4k G431 config (no serial client check)
+        run: make sitl_test_no_serial_client SITL_TEST_ARGS=-v
+
+  regression_proof:
+    # The same tests run against the bootloader from before the fix.
+    # They have to fail, otherwise they are not testing anything.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run the tests against the pre-fix bootloader
+        run: |
+          git show ${PRE_FIX_COMMIT}:bootloader/main.c > /tmp/main_pre_fix.c
+          make sitl SITL_BOOTLOADER=/tmp/main_pre_fix.c SITL_OBJ=obj/sitl-pre-fix
+          if obj/sitl-pre-fix/test_input_signal; then
+            echo "::error::the input signal tests pass against the pre-fix bootloader, so they do not catch the DShot detection bug"
+            exit 1
+          fi
+          echo "as expected, the pre-fix bootloader fails the input signal tests"

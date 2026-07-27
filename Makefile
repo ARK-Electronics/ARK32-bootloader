@@ -52,6 +52,15 @@ CFLAGS_BASE += -Wall -Wextra -Wundef -Werror -Wno-unused-parameter
 
 CFLAGS_COMMON := $(CFLAGS_BASE)
 
+# GCC 14 and later recognise the bit-by-bit loop in crc16() and replace
+# it with a 256 entry lookup table. That is faster, but it costs 512
+# bytes of .rodata which does not fit in the 4k bootloader region, and
+# the bootloader has no need for a fast CRC at 19200 baud.
+#
+# Only applied to targets built with the pinned Arm compiler. The V203
+# RISC-V toolchain is GCC 8 and rejects the option.
+CFLAGS_ARM_ONLY := -fno-optimize-crc
+
 # Linker options
 LDFLAGS_COMMON := -specs=nano.specs $(LIBS) -Wl,--gc-sections -Wl,--print-memory-usage
 
@@ -65,19 +74,9 @@ $(foreach MCU,$(MCU_TYPES),$(eval SVD_$(MCU) := $(wildcard $(HAL_FOLDER_$(MCU))/
 .PHONY : clean all
 all : check_tools bootloaders
 
-# Check if tools are installed
+# Check if tools are installed (Linux only; see make/tools.mk)
 check_tools:
-ifeq ($(MSYSTEM),UCRT64)
 	@$(SHELL) -c 'command -v $(CC) >/dev/null 2>&1 || { echo "Error: please install tools first with target arm_sdk_install."; exit 1; }'
-else
-ifeq ($(OS),Windows_NT)
-	@if not exist "$(CC).exe" ( \
-		echo Error: please install tools first with target arm_sdk_install. & exit /B 1 \
-	)
-else
-	@$(SHELL) -c 'command -v $(CC) >/dev/null 2>&1 || { echo "Error: please install tools first with target arm_sdk_install."; exit 1; }'
-endif
-endif
 
 clean :
 	@echo Removing $(OBJ) directory
@@ -157,6 +156,11 @@ $(eval BLU_TARGET := $(call BOOTLOADER_UPDATE_BASENAME,$(BUILD),$(PIN)))
 
 # get MCU specific compiler, objcopy and link script or use the ARM SDK one
 $(eval xCC := $(if $($(MCU)_CC), $($(MCU)_CC), $(CC)))
+# MCUs with their own compiler (V203) do not get the Arm only flags
+$(eval xCFLAGS_ARM := $(if $($(MCU)_CC),,$(CFLAGS_ARM_ONLY)))
+# per MCU flags for builds that have to fit the 4k bootloader region.
+# DroneCAN builds link against a 16k region and do not need them.
+$(eval xCFLAGS_4K := $(if $(call has_can_suffix,$(1)),,$(CFLAGS_4K_$(MCU))))
 $(eval xOBJCOPY := $(if $($(MCU)_OBJCOPY), $($(MCU)_OBJCOPY), $(OBJCOPY)))
 $(eval xLDSCRIPT := $(if $($(MCU)_LDSCRIPT), $($(MCU)_LDSCRIPT), $$(if $$(call has_can_suffix,$$(BUILD)),$(LDSCRIPT_BL_CAN),$(LDSCRIPT_BL))))
 $(eval xBLU_LDSCRIPT := $(if $($(MCU)_LDSCRIPT_BLU), $($(MCU)_LDSCRIPT_BLU), $$(if $$(call has_can_suffix,$$(BUILD)),$(LDSCRIPT_BLU_CAN),$(LDSCRIPT_BLU))))
@@ -166,7 +170,7 @@ $(eval SRC_DRONECAN := $(if $(call has_can_suffix,$(1)),$(SRC_DRONECAN_$(MCU))))
 -include $(DEP_FILE)
 -include $(BLU_DEP_FILE)
 
-$(ELF_FILE): CFLAGS_BL := $$(MCU_$(MCU)) $$(CFLAGS_$(MCU)) $$(CFLAGS_BASE) -DBOOTLOADER -DUSE_$(PIN) $(EXTRA_CFLAGS) -DAM32_MCU=\"$(MCU)\" $$(CFLAGS_DRONECAN)
+$(ELF_FILE): CFLAGS_BL := $$(MCU_$(MCU)) $$(CFLAGS_$(MCU)) $$(CFLAGS_BASE) -DBOOTLOADER -DUSE_$(PIN) $(EXTRA_CFLAGS) -DAM32_MCU=\"$(MCU)\" $$(CFLAGS_DRONECAN) $(xCFLAGS_ARM) $(xCFLAGS_4K)
 $(ELF_FILE): LDFLAGS_BL := $$(LDFLAGS_COMMON) $$(LDFLAGS_$(MCU)) -T$(xLDSCRIPT)
 $(ELF_FILE): $$(SRC_$(MCU)_BL) $$(SRC_BL) $$(SRC_DRONECAN)
 	$$(QUIET)echo building bootloader for $(BUILD) with pin $(PIN)
@@ -180,7 +184,7 @@ $(ELF_FILE): $$(SRC_$(MCU)_BL) $$(SRC_BL) $$(SRC_DRONECAN)
 $(H_FILE): $(BIN_FILE)
 	$$(QUIET)python3 bl_update/make_binheader.py $(BIN_FILE) $(H_FILE)
 
-$(BLU_ELF_FILE): CFLAGS_BLU := -DAM32_MCU=\"$(MCU)\" $$(MCU_$(MCU)) $$(CFLAGS_$(MCU)) $$(CFLAGS_BASE) -DBOOTLOADER -DUSE_$(PIN) $(EXTRA_CFLAGS) -Wno-unused-variable -Wno-unused-function
+$(BLU_ELF_FILE): CFLAGS_BLU := -DAM32_MCU=\"$(MCU)\" $$(MCU_$(MCU)) $$(CFLAGS_$(MCU)) $$(CFLAGS_BASE) -DBOOTLOADER -DUSE_$(PIN) $(EXTRA_CFLAGS) -Wno-unused-variable -Wno-unused-function $(xCFLAGS_ARM)
 $(BLU_ELF_FILE): LDFLAGS_BLU := $$(LDFLAGS_COMMON) $$(LDFLAGS_$(MCU)) -T$(xBLU_LDSCRIPT)
 $(BLU_ELF_FILE): $$(SRC_$(MCU)_BL) $$(SRC_BLU) $(H_FILE)
 	$$(QUIET)echo building bootloader updater for $(BUILD) with pin $(PIN)
@@ -223,10 +227,17 @@ $(foreach BUILD,$(MCU_BUILDS),$(foreach PIN,$(call pins_for_build,$(BUILD)),$(ev
 
 bootloaders: $(ALL_BUILDS)
 
+# print the size of every built bootloader, used by CI
+sizes:
+	$(QUIET)$(ARM_SDK_PREFIX)size $(OBJ)/*.elf
+
 updaters: $(BLU_BUILDS)
 
 # include the targets for installing tools
 include $(ROOT)/make/tools_install.mk
+
+# include the host build of the input signal tests
+include $(ROOT)/make/sitl.mk
 
 # useful target to list all of the board targets so you can see what
 # make target to use for your board
