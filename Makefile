@@ -243,6 +243,9 @@ updaters: $(BLU_BUILDS)
 # include the targets for installing tools
 include $(ROOT)/make/tools_install.mk
 
+# include the host build of the input signal tests
+include $(ROOT)/make/sitl.mk
+
 # useful target to list all of the board targets so you can see what
 # make target to use for your board
 targets:
