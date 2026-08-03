@@ -1416,11 +1416,11 @@ int main(void)
   bl_clock_config();
   bl_timer_init();
   bl_gpio_init();
-#if defined(GATE_DRIVER_OFF_PORT) && defined(GATE_DRIVER_OFF_PIN_NUM)
-  /* DRV8328 nSLEEP (etc.): keep the gate driver asleep while in the BL */
+  bl_led_init();
+#if defined(GATE_DRIVER_OFF_PORT) && (defined(GATE_DRIVER_OFF_PIN) || defined(GATE_DRIVER_OFF_PIN_NUM))
+  /* DRV8350 ENABLE / DRV8328 nSLEEP — keep gate driver asleep in BL */
   bl_gate_driver_off();
 #endif
-  bl_led_init();
 
 #ifdef BOOTLOADER_TEST_CLOCK
   test_clock();

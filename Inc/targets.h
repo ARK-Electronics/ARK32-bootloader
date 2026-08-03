@@ -30,6 +30,11 @@
                                                      GPIO_PORT_PIN(portnum, pinnum)
                                                      where portnum is 0=A,1=B,2=C.
     USE_RGB_LED + RED_PORT/RED_PIN, GREEN_PORT/GREEN_PIN, BLUE_PORT/BLUE_PIN
+    GATE_DRIVER_OFF_PORT / GATE_DRIVER_OFF_PIN     - smart gate-driver run pin
+                                                     (DRV8350 ENABLE, DRV8328
+                                                     nSLEEP). Driven low for the
+                                                     whole bootloader so the
+                                                     driver stays in sleep.
     USE_HSE / HSE_VALUE / USE_HSE_BYPASS           - external high-speed
                                                      oscillator (see the
                                                      per-MCU Mcu/<mcu>/Inc/
@@ -74,6 +79,10 @@
 #define GREEN_PIN  LL_GPIO_PIN_7
 #define BLUE_PORT  GPIOC
 #define BLUE_PIN   LL_GPIO_PIN_8
+
+// DRV8350H ENABLE (PC9): hold low so the gate driver stays in sleep in BL
+#define GATE_DRIVER_OFF_PORT GPIOC
+#define GATE_DRIVER_OFF_PIN  LL_GPIO_PIN_9
 
 // CAN termination pin on PC12, active high
 #define CAN_TERM_PIN GPIO_PORT_PIN(2, 12) // PC12

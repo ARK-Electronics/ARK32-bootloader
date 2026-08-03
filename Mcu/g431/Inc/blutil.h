@@ -176,6 +176,32 @@ static inline void bl_gpio_init(void)
 }
 
 /*
+  Hold the smart gate-driver run pin low (DRV8350 ENABLE, etc.) for the
+  whole bootloader so the charge pump / gate rails stay in sleep.
+ */
+static inline void bl_gate_driver_off(void)
+{
+#ifdef GATE_DRIVER_OFF_PORT
+  LL_GPIO_InitTypeDef s = {0};
+  /* Port may be C (ENABLE) while bl_gpio_init only clocks A/B. */
+  if (GATE_DRIVER_OFF_PORT == GPIOA) {
+    LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOA);
+  } else if (GATE_DRIVER_OFF_PORT == GPIOB) {
+    LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOB);
+  } else if (GATE_DRIVER_OFF_PORT == GPIOC) {
+    LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOC);
+  }
+  s.Pin = GATE_DRIVER_OFF_PIN;
+  s.Mode = LL_GPIO_MODE_OUTPUT;
+  s.Speed = LL_GPIO_SPEED_FREQ_LOW;
+  s.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  s.Pull = LL_GPIO_PULL_NO;
+  LL_GPIO_Init(GATE_DRIVER_OFF_PORT, &s);
+  LL_GPIO_ResetOutputPin(GATE_DRIVER_OFF_PORT, GATE_DRIVER_OFF_PIN);
+#endif
+}
+
+/*
   RGB LED support, driven by per-board RED/GREEN/BLUE_PORT/_PIN from
   Inc/targets.h (active low, open drain). Pins are LL_GPIO_PIN_x masks.
  */
