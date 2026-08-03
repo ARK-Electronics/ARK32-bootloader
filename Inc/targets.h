@@ -30,6 +30,11 @@
                                                      GPIO_PORT_PIN(portnum, pinnum)
                                                      where portnum is 0=A,1=B,2=C.
     USE_RGB_LED + RED_PORT/RED_PIN, GREEN_PORT/GREEN_PIN, BLUE_PORT/BLUE_PIN
+    GATE_DRIVER_OFF_PORT / GATE_DRIVER_OFF_PIN     - smart gate-driver run pin
+                                                     (DRV8350 ENABLE, DRV8328
+                                                     nSLEEP). Driven low for the
+                                                     whole bootloader so the
+                                                     driver stays in sleep.
     USE_HSE / HSE_VALUE / USE_HSE_BYPASS           - external high-speed
                                                      oscillator (see the
                                                      per-MCU Mcu/<mcu>/Inc/
@@ -75,6 +80,10 @@
 #define BLUE_PORT  GPIOC
 #define BLUE_PIN   LL_GPIO_PIN_8
 
+// DRV8350H ENABLE (PC9): hold low so the gate driver stays in sleep in BL
+#define GATE_DRIVER_OFF_PORT GPIOC
+#define GATE_DRIVER_OFF_PIN  LL_GPIO_PIN_9
+
 // CAN termination pin on PC12, active high
 #define CAN_TERM_PIN GPIO_PORT_PIN(2, 12) // PC12
 #define CAN_TERM_POLARITY 1
@@ -87,6 +96,20 @@
 
 // G491 has 112KB RAM; allow app stack pointer above the 64KB default
 #define RAM_LIMIT_KB 112
+#endif
+
+/*
+  ARK 4IN1 F051 — same PB4 signal pin as the generic F051 bootloader, plus
+  explicit DRV8328 nSLEEP (PA15) held low for idle power.
+ */
+#ifdef ARK_4IN1_F051
+#define FILE_NAME "ARK_4IN1_F051" // parser: MCU=F051, non-CAN
+#define TARGET_TAG ARK4IN1        // -> AM32_F051_BOOTLOADER_ARK4IN1
+#define USE_PB4
+
+// DRV8328 nSLEEP (PA15): hold low so the gate driver stays in sleep in BL
+#define GATE_DRIVER_OFF_PORT GPIOA
+#define GATE_DRIVER_OFF_PIN  LL_GPIO_PIN_15
 #endif
 
 #ifdef SEQURE_G431_CAN
