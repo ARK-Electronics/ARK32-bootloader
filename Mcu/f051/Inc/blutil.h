@@ -145,6 +145,32 @@ static inline void bl_gpio_init(void)
 }
 
 /*
+  Hold the smart gate-driver run pin low for the whole bootloader stay
+  (e.g. DRV8328 nSLEEP on ARK 4IN1). Optional board CFLAGS:
+    -DGATE_DRIVER_OFF_PORT=GPIOA -DGATE_DRIVER_OFF_PIN_NUM=15
+  (see Makefile ARK4IN1 product).
+ */
+static inline void bl_gate_driver_off(void)
+{
+#if defined(GATE_DRIVER_OFF_PORT) && defined(GATE_DRIVER_OFF_PIN_NUM)
+  LL_GPIO_InitTypeDef s = {0};
+  const uint32_t pin = (1U << (GATE_DRIVER_OFF_PIN_NUM));
+  if (GATE_DRIVER_OFF_PORT == GPIOA) {
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
+  } else if (GATE_DRIVER_OFF_PORT == GPIOB) {
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOB);
+  }
+  s.Pin = pin;
+  s.Mode = LL_GPIO_MODE_OUTPUT;
+  s.Speed = LL_GPIO_SPEED_FREQ_LOW;
+  s.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+  s.Pull = LL_GPIO_PULL_NO;
+  LL_GPIO_Init(GATE_DRIVER_OFF_PORT, &s);
+  LL_GPIO_ResetOutputPin(GATE_DRIVER_OFF_PORT, pin);
+#endif
+}
+
+/*
   return true if the MCU booted under a software reset
  */
 static inline bool bl_was_software_reset(void)

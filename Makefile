@@ -225,6 +225,61 @@ pins_for_build = $(if $(BOOTLOADER_PINS_$(call base_mcu,$1)),$(BOOTLOADER_PINS_$
 
 $(foreach BUILD,$(MCU_BUILDS),$(foreach PIN,$(call pins_for_build,$(BUILD)),$(eval $(call CREATE_BOOTLOADER_TARGET,$(BUILD),$(PIN)))))
 
+# ---------------------------------------------------------------------------
+# Named board builds: signal pin + board-specific CFLAGS (not just USE_<PIN>).
+# Product name is AM32_<MCU>_BOOTLOADER_<BOARD_TAG>_V18.
+# Args: BUILD (MCU), BOARD_TAG, SIGNAL_PIN, EXTRA_CFLAGS
+# ---------------------------------------------------------------------------
+define CREATE_BOARD_BOOTLOADER_TARGET
+$(eval BUILD := $(1))
+$(eval BOARD_TAG := $(2))
+$(eval PIN := $(3))
+$(eval BOARD_CFLAGS := $(4))
+$(eval MCU := $$(call base_mcu,$$(1)))
+$(eval EXTRA_CFLAGS := $(call get_cflags,$(1)) $(BOARD_CFLAGS))
+$(eval ELF_FILE := $(BIN_DIR)/$(call BOOTLOADER_BASENAME_VER,$(BUILD),$(BOARD_TAG)).elf)
+$(eval HEX_FILE := $(ELF_FILE:.elf=.hex))
+$(eval DEP_FILE := $(ELF_FILE:.elf=.d))
+$(eval BIN_FILE := $(ELF_FILE:.elf=.bin))
+$(eval MAP_FILE := $(ELF_FILE:.elf=.map))
+$(eval TARGET := $(call BOOTLOADER_BASENAME,$(BUILD),$(BOARD_TAG)))
+
+$(eval xCC := $(if $($(MCU)_CC), $($(MCU)_CC), $(CC)))
+$(eval xCFLAGS_ARM := $(if $($(MCU)_CC),,$(CFLAGS_ARM_ONLY)))
+$(eval xCFLAGS_4K := $(if $(call has_can_suffix,$(1)),,$(CFLAGS_4K_$(MCU))))
+$(eval xOBJCOPY := $(if $($(MCU)_OBJCOPY), $($(MCU)_OBJCOPY), $(OBJCOPY)))
+$(eval xLDSCRIPT := $(if $($(MCU)_LDSCRIPT), $($(MCU)_LDSCRIPT), $$(if $$(call has_can_suffix,$$(BUILD)),$(LDSCRIPT_BL_CAN),$(LDSCRIPT_BL))))
+$(eval CFLAGS_DRONECAN := $$(if $$(call has_can_suffix,$$(1)),$$(CFLAGS_DRONECAN_L431)))
+$(eval SRC_DRONECAN := $(if $(call has_can_suffix,$(1)),$(SRC_DRONECAN_$(MCU))))
+
+-include $(DEP_FILE)
+
+$(ELF_FILE): CFLAGS_BL := $$(MCU_$(MCU)) $$(CFLAGS_$(MCU)) $$(CFLAGS_BASE) -DBOOTLOADER -DUSE_$(PIN) $(EXTRA_CFLAGS) -DAM32_MCU=\"$(MCU)\" $$(CFLAGS_DRONECAN) $(xCFLAGS_ARM) $(xCFLAGS_4K)
+$(ELF_FILE): LDFLAGS_BL := $$(LDFLAGS_COMMON) $$(LDFLAGS_$(MCU)) -T$(xLDSCRIPT)
+$(ELF_FILE): $$(SRC_$(MCU)_BL) $$(SRC_BL) $$(SRC_DRONECAN)
+	$$(QUIET)echo building bootloader for $(BUILD) board $(BOARD_TAG) pin=$(PIN)
+	$$(QUIET)$$(MKDIR) -p $(OBJ)
+	$$(QUIET)echo Compiling $(notdir $$@)
+	$$(QUIET)$(xCC) $$(CFLAGS_BL) $$(LDFLAGS_BL) -MMD -MP -MF $(DEP_FILE) -o $$(@) $$(SRC_$(MCU)_BL) $$(SRC_BL) $(SRC_DRONECAN) -Wl,-Map=$(MAP_FILE)
+	$$(QUIET)$$(CP) -f $$@ $$(OBJ)$$(DSEP)debug.elf
+	$$(QUIET)$$(CP) -f $$(SVD_$(MCU)) $$(OBJ)/debug.svd
+	$$(QUIET)$$(CP) -f Mcu$(DSEP)$(call lc,$(MCU))$(DSEP)openocd.cfg $$(OBJ)$$(DSEP)openocd.cfg > $$(NUL)
+
+$(HEX_FILE): $$(ELF_FILE)
+	$$(QUIET)echo Generating $(notdir $$@)
+	$$(QUIET)$(xOBJCOPY) -O binary $$(<) $$(@:.hex=.bin)
+	$$(QUIET)$(xOBJCOPY) $$(<) -O ihex $$(@:.bin=.hex)
+
+$(BIN_FILE): $$(HEX_FILE)
+
+$(TARGET): $$(HEX_FILE)
+
+ALL_BUILDS := $(ALL_BUILDS) $(TARGET)
+endef
+
+# ARK 4IN1 F051: PB4 signal (same as generic PB4), PA15 = DRV8328 nSLEEP held low
+$(eval $(call CREATE_BOARD_BOOTLOADER_TARGET,F051,ARK4IN1,PB4,-DGATE_DRIVER_OFF_PORT=GPIOA -DGATE_DRIVER_OFF_PIN_NUM=15))
+
 bootloaders: $(ALL_BUILDS)
 
 # print the size of every built bootloader, used by CI
