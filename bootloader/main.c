@@ -1438,17 +1438,23 @@ int main(void)
     the jump. Must run before checkForSignal(), whose float+low path calls jump()
     unconditionally - otherwise jump() is rejected with have_raw_command false
     and a DShot-only boot bounces.
+
+    Prefer detect_fast_input_signal() so bidirectional DShot (idle high) is
+    recognised; fall back to a coarse "any low within ~5ms" sample for a
+    line held low without fast edges.
   */
   {
     gpio_mode_set_input(input_pin, GPIO_PULL_UP);
     delayMicroseconds(500);
-    bool has_pin_signal = false;
-    for (int i = 0; i < 500; i++) {
-      if (!gpio_read(input_pin)) {
-        has_pin_signal = true;
-        break;
+    bool has_pin_signal = detect_fast_input_signal();
+    if (!has_pin_signal) {
+      for (int i = 0; i < 500; i++) {
+        if (!gpio_read(input_pin)) {
+          has_pin_signal = true;
+          break;
+        }
+        delayMicroseconds(10);
       }
-      delayMicroseconds(10);
     }
     if (has_pin_signal) {
       DroneCAN_set_have_signal();
@@ -1493,7 +1499,12 @@ int main(void)
       turn one error into several. A real flight controller drives the
       pin continuously and trips this within a few bytes regardless.
     */
-    if (invalid_command > 2 && detect_fast_input_signal()) {
+    /*
+      Skip the multi-ms DShot sample while a 4-way serial client is
+      active - same reason we pause DroneCAN: staring at the pin would
+      drop bytes mid-transfer.
+    */
+    if (!bl_serial_active && invalid_command > 2 && detect_fast_input_signal()) {
       jump();
     }
 #if DRONECAN_SUPPORT
