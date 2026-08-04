@@ -174,9 +174,6 @@ static inline void bl_gate_driver_off(void)
 #endif
 }
 
-#endif
-}
-
 /*
   return true if the MCU booted under a software reset
  */
