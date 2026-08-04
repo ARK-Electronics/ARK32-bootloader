@@ -95,9 +95,14 @@ void sys_can_init(void)
   can_baudrate_struct.bts2_size = CAN_BTS2_3TQ;
   can_baudrate_set(CAN1, &can_baudrate_struct);
 
-  /* can filter init */
+  /* can filter init.
+     filter_mode must be initialised explicitly; can_filter_init() reads it
+     in a switch with no guaranteed default. Mask mode with id=0/mask=0
+     means "accept all". Without LTO the uninitialised read was invisible;
+     LTO inlining exposes it as -Werror=maybe-uninitialized. */
   can_filter_init_type can_filter_init_struct;
   can_filter_init_struct.filter_activate_enable = TRUE;
+  can_filter_init_struct.filter_mode = CAN_FILTER_MODE_ID_MASK;
   can_filter_init_struct.filter_fifo = CAN_FILTER_FIFO0;
   can_filter_init_struct.filter_number = 0;
   can_filter_init_struct.filter_bit = CAN_FILTER_32BIT;
@@ -254,6 +259,34 @@ void set_rtc_backup_register(uint8_t idx, uint32_t value)
 {
   ertc_init();
   ertc_bpr_data_write((ertc_dt_type)idx, value);
+}
+
+/*
+  drive a static port/pin as an output, used for CAN bus termination.
+  Ported from ../AM32/Src/DroneCAN/sys_can_at32.c. AT32 uses its own
+  gpio API (gpio_init / scr / clr) so this can't share code with the
+  STM32 bxCAN driver.
+ */
+void setup_portpin(uint16_t portpin, bool enable)
+{
+  const uint8_t port = portpin >> 8;
+  const uint8_t pin = portpin & 0xff;
+  const uint32_t pinshift = 1U << pin;
+  gpio_type *pport = port == 0 ? GPIOA : GPIOB;
+
+  if (enable) {
+    pport->scr = pinshift;
+  } else {
+    pport->clr = pinshift;
+  }
+
+  gpio_init_type gpio_init_struct;
+  gpio_init_struct.gpio_drive_strength = GPIO_DRIVE_STRENGTH_STRONGER;
+  gpio_init_struct.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
+  gpio_init_struct.gpio_mode = GPIO_MODE_OUTPUT;
+  gpio_init_struct.gpio_pins = pinshift;
+  gpio_init_struct.gpio_pull = GPIO_PULL_NONE;
+  gpio_init(pport, &gpio_init_struct);
 }
 
 #endif // DRONECAN_SUPPORT && defined(ARTERY)

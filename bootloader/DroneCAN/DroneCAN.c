@@ -32,6 +32,19 @@
 #define DRONECAN_DEBUG 0
 #endif
 
+/*
+  DRONECAN_PARAM_SUPPORT_ENABLED gates the whole
+  uavcan.protocol.param.{GetSet,ExecuteOpcode} interface in the
+  bootloader: the parameter table, the handlers, the dispatch in
+  onTransferReceived(), and the shouldAcceptTransfer() entries.
+  Default on; a custom bootloader that needs the ~1 KB of flash for
+  something else can build with -DDRONECAN_PARAM_SUPPORT_ENABLED=0
+  and the DroneCAN GUI will just see an empty parameter list.
+ */
+#ifndef DRONECAN_PARAM_SUPPORT_ENABLED
+#define DRONECAN_PARAM_SUPPORT_ENABLED 1
+#endif
+
 #ifndef DRONECAN_CHECK_SIGNATURE
 #define DRONECAN_CHECK_SIGNATURE 1
 #endif
@@ -53,6 +66,15 @@ static uint8_t canard_memory_pool[CANARD_POOL_SIZE];
 #endif
 
 /*
+  the EEPROM region we preserve on a single-byte update. This must cover
+  the highest parameter offset we touch (currently ESC_INDEX at byte 177)
+  and matches the main firmware's EEPROM_MAX_SIZE so we don't truncate
+  state the application has stored above the default_settings block.
+  Must be a multiple of the flash word granularity (8 on L431/G431).
+ */
+#define EEPROM_PRESERVE_SIZE 1024
+
+/*
   keep the state for firmware update
 */
 static struct {
@@ -63,7 +85,22 @@ static struct {
   uint32_t offset;
 } fwupdate;
 
-static bool have_raw_command;
+// set from the CAN RX ISR (RawCommand) and read in the boot decision, so
+// volatile (especially with -flto cross-TU optimisation)
+static volatile bool have_raw_command;
+
+// no-CAN-cable fallback: behave like a non-CAN build when no CAN frame is
+// seen within NONCAN_FALLBACK_MS. can_seen is set RX-only; noncan_fallback
+// relaxes the boot gate once the deadline passes with no traffic.
+static volatile bool can_seen;
+static bool noncan_fallback;
+#define NONCAN_FALLBACK_MS 250
+#define DRONECAN_INPUT_TYPE 5   // mirrors DRONECAN_IN in AM32 Inc/common.h (EEPROM byte 46)
+
+void DroneCAN_set_have_signal(void)
+{
+  have_raw_command = true;
+}
 
 // some convenience macros
 #define MIN(a,b) ((a)<(b)?(a):(b))
@@ -117,14 +154,13 @@ static uint16_t get_random16(void)
 }
 
 /*
-  get a 64 bit monotonic timestamp in microseconds since start. This
-  is platform specific
-
-  NOTE: this should be in functions.c
+  monotonic microseconds since start. uint32 wraps at ~71min, far beyond the
+  bootloader lifetime, and avoids the libgcc 64-bit divide. libcanard takes
+  uint64 timestamps - cast at the call sites.
 */
-static uint64_t micros64(void)
+static uint32_t micros32(void)
 {
-  static uint64_t base_us;
+  static uint32_t base_us;
   static uint16_t last_cnt;
   uint16_t cnt = bl_timer_us();
   if (cnt < last_cnt) {
@@ -135,11 +171,12 @@ static uint64_t micros64(void)
 }
 
 /*
-  get monotonic time in milliseconds since startup
+  get monotonic time in milliseconds since startup. 32-bit divide compiles
+  to a single UDIV on cortex-m4/m33 -- no libgcc helper needed.
 */
 static uint32_t millis32(void)
 {
-  return micros64() / 1000ULL;
+  return micros32() / 1000U;
 }
 
 /*
@@ -169,7 +206,11 @@ static uint32_t crc32(const uint8_t *buf, uint32_t size)
 }
 #endif
 
-// print to CAN LogMessage for debugging
+/*
+  print to CAN LogMessage for debugging. Compiled out unless DRONECAN_DEBUG;
+  the no-op inline stub lets the linker drop LogMessage_encode and the strings.
+ */
+#if DRONECAN_DEBUG
 static void can_print(const char *s)
 {
   struct uavcan_protocol_debug_LogMessage pkt;
@@ -188,6 +229,405 @@ static void can_print(const char *s)
                   &logmsg_transfer_id,
                   CANARD_TRANSFER_PRIORITY_LOW,
                   buffer, len);
+}
+#else
+static inline void can_print(const char *s) { (void)s; }
+#endif
+
+#if DRONECAN_PARAM_SUPPORT_ENABLED
+/*
+  parameter type tags. These mirror what the main firmware exposes over
+  the wire via uavcan.protocol.param.Value so a DroneCAN GUI sees the
+  same value type (and therefore the same widget) for a given parameter
+  whether it's talking to the bootloader or the application.
+ */
+enum bl_param_type {
+  BL_T_UINT8 = 0,
+  BL_T_BOOL,
+  BL_T_UINT16,    // stored as a single EEPROM byte, scaled on the wire
+  BL_T_STRING,    // STARTUP_TUNE only, at eepromBuffer.tune (offset 48..175)
+};
+
+/*
+  EEPROM byte offsets that need a non-trivial uint8 <-> wire mapping.
+  Kept as named constants here so the special-case branches in
+  bl_param_*_value() and the set path read sensibly.
+  These match ../AM32/Inc/eeprom.h::eepromBuffer member offsets.
+ */
+#define EEPROM_OFS_ADVANCE_LEVEL          23
+#define EEPROM_OFS_MOTOR_KV               26
+#define EEPROM_OFS_LOW_CELL_VOLT_CUTOFF   37
+#define EEPROM_OFS_LIMITS_CURRENT         44
+#define EEPROM_OFS_TUNE                   48
+#define EEPROM_TUNE_LEN                   128
+
+/*
+  remap table for legacy pre-v3 EEPROM advance_level encodings. Matches
+  ../AM32/Src/DroneCAN/DroneCAN.c::advance_level_v3_remap so a DroneCAN
+  client reading ADVANCE_LEVEL via the bootloader sees the same value
+  it would see via the application on an ESC that hasn't been rewritten
+  since the v3 migration.
+ */
+static const uint8_t advance_level_v3_remap[] = { 0x00, 0x08, 0x10, 0x16 };
+
+/*
+  parameters the bootloader exposes via uavcan.protocol.param.GetSet.
+  Name / vtype / min / max / default mirror the main firmware's
+  parameters[] table in ../AM32/Src/DroneCAN/DroneCAN.c so a DroneCAN GUI
+  shows the same values and ranges whether it talks to the application
+  or to the bootloader.
+
+  default_value is what we report on the wire when the raw EEPROM byte
+  is uninitialised (0xFF) or out of range. For parameters whose EEPROM
+  offset is inside the default_settings[] block (offsets 0..47) the
+  response's default_value is taken from default_settings instead, to
+  match the main firmware's behaviour exactly.
+ */
+static const struct bl_param {
+  const char *name;
+  uint16_t min_value;
+  uint16_t max_value;
+  uint16_t default_value;
+  uint8_t vtype;          // enum bl_param_type
+  uint8_t eeprom_offset;
+} bl_parameters[] = {
+  // CAN/DroneCAN block (offsets 176..183) — affects the bootloader's own
+  // CAN bus identity, so it has to be settable without booting the app.
+  { "CAN_NODE",                  0,   127,    0, BL_T_UINT8,  176 },
+  { "ESC_INDEX",                 0,    32,    0, BL_T_UINT8,  177 },
+  { "TELEM_RATE",                0,   200,   25, BL_T_UINT8,  179 },
+  { "DEBUG_RATE",                0,   200,    0, BL_T_UINT8,  182 },
+  { "REQUIRE_ARMING",            0,     1,    1, BL_T_BOOL,   178 },
+  { "REQUIRE_ZERO_THROTTLE",     0,     1,    1, BL_T_BOOL,   180 },
+
+  // ESC behaviour (offsets within the first 48 B). Setting these from
+  // the bootloader lets a user reconfigure an ESC without first running
+  // the application; the main firmware applies them at next boot.
+  { "MOTOR_KV",                 20, 10220, 2000, BL_T_UINT16, EEPROM_OFS_MOTOR_KV },
+  { "MOTOR_POLES",               2,    64,   14, BL_T_UINT8,  27 },
+  { "DIR_REVERSED",              0,     1,    0, BL_T_BOOL,   17 },
+  { "BI_DIRECTIONAL",            0,     1,    0, BL_T_BOOL,   18 },
+  { "BEEP_VOLUME",               0,    11,    5, BL_T_UINT8,  30 },
+  { "VARIABLE_PWM",              0,     2,    1, BL_T_UINT8,  21 },
+  { "PWM_FREQUENCY",             8,   144,   24, BL_T_UINT8,  24 },
+  { "MAX_RAMP",                  1,   200,  160, BL_T_UINT8,   5 },
+  { "MIN_DUTY_CYCLE",            0,    50,    4, BL_T_UINT8,   6 },
+  { "USE_SIN_START",             0,     1,    0, BL_T_BOOL,   19 },
+  { "COMP_PWM",                  0,     1,    1, BL_T_BOOL,   20 },
+  { "STUCK_ROTOR_PROTECTION",    0,     1,    1, BL_T_BOOL,   22 },
+  { "ADVANCE_LEVEL",             0,    30,   26, BL_T_UINT8,  EEPROM_OFS_ADVANCE_LEVEL },
+  { "AUTO_ADVANCE",              0,     1,    0, BL_T_BOOL,   47 },
+  { "STARTUP_POWER",            50,   150,   10, BL_T_UINT8,  25 },
+  { "CURRENT_LIMIT",             0,   200,    0, BL_T_UINT8,  EEPROM_OFS_LIMITS_CURRENT },
+  { "TEMPERATURE_LIMIT",        70,   255,  255, BL_T_UINT8,  43 },
+  { "LOW_VOLTAGE_CUTOFF",        0,     1,    0, BL_T_BOOL,   36 },
+  { "CELL_VOLTAGE_THRESHOLD",  250,   350,  300, BL_T_UINT16, EEPROM_OFS_LOW_CELL_VOLT_CUTOFF },
+  { "BRAKE_ON_STOP",             0,     1,    1, BL_T_BOOL,   28 },
+  { "DRIVING_BRAKE_STRENGTH",    1,    10,   10, BL_T_UINT8,  42 },
+  { "DRAG_BRAKE_STRENGTH",       1,    10,   10, BL_T_UINT8,  41 },
+  { "INPUT_SIGNAL_TYPE",         0,     5,    5, BL_T_UINT8,  46 },
+  { "INPUT_FILTER_HZ",           0,   100,    0, BL_T_UINT8,  181 },
+#ifdef CAN_TERM_PIN
+  { "CAN_TERM_ENABLE",           0,     1,    0, BL_T_BOOL,   183 },
+#endif
+  { "STARTUP_TUNE",              0,     4,    0, BL_T_STRING, EEPROM_OFS_TUNE },
+};
+
+#define NUM_BL_PARAMS (sizeof(bl_parameters)/sizeof(bl_parameters[0]))
+
+/*
+  patch a contiguous run of bytes in the EEPROM page while preserving
+  the rest. STM32 flash is page-erase-then-program: save_flash_nolib()
+  erases the whole 2 KB page at EEPROM_START_ADD and writes back only
+  the bytes we hand it, so we copy out enough of the live page to cover
+  every application setting, splice in the new bytes, and write the lot
+  back. EEPROM_PRESERVE_SIZE matches the main firmware's EEPROM_MAX_SIZE.
+  Returns true on success.
+ */
+static bool set_eeprom_bytes(uint16_t offset, const uint8_t *data, uint16_t len)
+{
+  static uint8_t buf[EEPROM_PRESERVE_SIZE];
+  if ((uint32_t)offset + len > sizeof(buf)) {
+    return false;
+  }
+  memcpy(buf, (const void *)EEPROM_START_ADD, sizeof(buf));
+  if (memcmp(buf + offset, data, len) == 0) {
+    // nothing to do; avoid an unnecessary erase cycle.
+    return true;
+  }
+  memcpy(buf + offset, data, len);
+  return save_flash_nolib(buf, sizeof(buf), EEPROM_START_ADD);
+}
+
+static bool set_eeprom_byte(uint16_t offset, uint8_t value)
+{
+  return set_eeprom_bytes(offset, &value, 1);
+}
+
+/*
+  read the live (effective) wire value of a numeric parameter from
+  EEPROM, applying the same default-and-clamp rules and scaling the
+  main firmware uses. Sets *out_val and returns true on success;
+  returns false if the parameter is BL_T_STRING (caller must handle
+  strings separately) or if no parameter exists at p_idx.
+ */
+static bool bl_param_read_numeric(uint8_t p_idx, uint16_t *out_val)
+{
+  const uint8_t *eeprom = (const uint8_t *)EEPROM_START_ADD;
+  const struct bl_param *p = &bl_parameters[p_idx];
+  if (p->vtype == BL_T_STRING) {
+    return false;
+  }
+  if (eeprom[0] != 0x01) {
+    *out_val = p->default_value;
+    return true;
+  }
+  const uint8_t raw = eeprom[p->eeprom_offset];
+  uint16_t v;
+  switch (p->vtype) {
+  case BL_T_UINT16:
+    if (p->eeprom_offset == EEPROM_OFS_MOTOR_KV) {
+      v = (uint16_t)raw * 40U + 20U;
+    } else if (p->eeprom_offset == EEPROM_OFS_LOW_CELL_VOLT_CUTOFF) {
+      v = (uint16_t)raw + 250U;
+    } else {
+      v = raw;
+    }
+    break;
+  case BL_T_UINT8:
+  case BL_T_BOOL:
+  default:
+    v = raw;
+    if (p->eeprom_offset == EEPROM_OFS_LIMITS_CURRENT) {
+      v = (uint16_t)(v * 2U);
+    } else if (p->eeprom_offset == EEPROM_OFS_ADVANCE_LEVEL) {
+      if (v < sizeof(advance_level_v3_remap)) {
+        v = advance_level_v3_remap[v];
+      }
+      if (v >= 10) {
+        v -= 10;
+      }
+    }
+    break;
+  }
+  // Clamp to range; an out-of-range raw byte (typically 0xFF on
+  // uninitialised EEPROM) maps to the parameter's default_value.
+  if (v < p->min_value || v > p->max_value) {
+    v = p->default_value;
+  }
+  *out_val = v;
+  return true;
+}
+
+/*
+  write the wire value of a numeric parameter through to EEPROM, applying
+  the inverse of the scaling bl_param_read_numeric() applies. v is
+  pre-clamped to [min_value, max_value]; returns the result of the
+  flash write.
+ */
+static bool bl_param_write_numeric(uint8_t p_idx, uint16_t v)
+{
+  const struct bl_param *p = &bl_parameters[p_idx];
+  if (v < p->min_value) v = p->min_value;
+  if (v > p->max_value) v = p->max_value;
+  uint8_t raw;
+  switch (p->vtype) {
+  case BL_T_UINT16:
+    if (p->eeprom_offset == EEPROM_OFS_MOTOR_KV) {
+      raw = (uint8_t)((v - 20U) / 40U);
+    } else if (p->eeprom_offset == EEPROM_OFS_LOW_CELL_VOLT_CUTOFF) {
+      raw = (uint8_t)(v - 250U);
+    } else {
+      raw = (uint8_t)v;
+    }
+    break;
+  case BL_T_UINT8:
+  case BL_T_BOOL:
+  default:
+    if (p->eeprom_offset == EEPROM_OFS_LIMITS_CURRENT) {
+      raw = (uint8_t)(v / 2U);
+    } else if (p->eeprom_offset == EEPROM_OFS_ADVANCE_LEVEL) {
+      raw = (uint8_t)(v + 10U);
+    } else {
+      raw = (uint8_t)v;
+    }
+    break;
+  }
+  return set_eeprom_byte(p->eeprom_offset, raw);
+}
+
+/*
+  populate pkt.value / pkt.default_value / pkt.min_value / pkt.max_value
+  for parameter p_idx. For BL_T_UINT8/BL_T_BOOL parameters that live in
+  the default_settings[] region (offsets 0..47), the response's
+  default_value comes from default_settings (matching the main firmware);
+  for everything else we report the parameter table's default_value.
+ */
+static void bl_param_fill_response(struct uavcan_protocol_param_GetSetResponse *pkt, uint8_t p_idx)
+{
+  const struct bl_param *p = &bl_parameters[p_idx];
+  const uint8_t off = p->eeprom_offset;
+  uint16_t cur_val = 0;
+  const bool have_numeric = bl_param_read_numeric(p_idx, &cur_val);
+
+  switch (p->vtype) {
+  case BL_T_UINT8: {
+    pkt->value.union_tag = UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE;
+    pkt->value.integer_value = cur_val;
+    pkt->default_value.union_tag = UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE;
+    if (off < sizeof(default_settings)) {
+      uint16_t d = default_settings[off];
+      if (off == EEPROM_OFS_LIMITS_CURRENT) d = (uint16_t)(d * 2U);
+      pkt->default_value.integer_value = d;
+    } else {
+      pkt->default_value.integer_value = p->default_value;
+    }
+    pkt->min_value.union_tag = UAVCAN_PROTOCOL_PARAM_NUMERICVALUE_INTEGER_VALUE;
+    pkt->min_value.integer_value = p->min_value;
+    pkt->max_value.union_tag = UAVCAN_PROTOCOL_PARAM_NUMERICVALUE_INTEGER_VALUE;
+    pkt->max_value.integer_value = p->max_value;
+    break;
+  }
+  case BL_T_BOOL: {
+    pkt->value.union_tag = UAVCAN_PROTOCOL_PARAM_VALUE_BOOLEAN_VALUE;
+    pkt->value.boolean_value = cur_val ? 1 : 0;
+    pkt->default_value.union_tag = UAVCAN_PROTOCOL_PARAM_VALUE_BOOLEAN_VALUE;
+    if (off < sizeof(default_settings)) {
+      pkt->default_value.boolean_value = default_settings[off] ? 1 : 0;
+    } else {
+      pkt->default_value.boolean_value = p->default_value ? 1 : 0;
+    }
+    break;
+  }
+  case BL_T_UINT16: {
+    pkt->value.union_tag = UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE;
+    pkt->value.integer_value = cur_val;
+    pkt->default_value.union_tag = UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE;
+    pkt->default_value.integer_value = p->default_value;
+    pkt->min_value.union_tag = UAVCAN_PROTOCOL_PARAM_NUMERICVALUE_INTEGER_VALUE;
+    pkt->min_value.integer_value = p->min_value;
+    pkt->max_value.union_tag = UAVCAN_PROTOCOL_PARAM_NUMERICVALUE_INTEGER_VALUE;
+    pkt->max_value.integer_value = p->max_value;
+    break;
+  }
+  case BL_T_STRING: {
+    pkt->value.union_tag = UAVCAN_PROTOCOL_PARAM_VALUE_STRING_VALUE;
+    const uint8_t *eeprom = (const uint8_t *)EEPROM_START_ADD;
+    const uint16_t maxlen = sizeof(pkt->value.string_value.data);
+    uint16_t slen = EEPROM_TUNE_LEN;
+    if (slen > maxlen) slen = maxlen;
+    pkt->value.string_value.len = slen;
+    memcpy(pkt->value.string_value.data, &eeprom[off], slen);
+    break;
+  }
+  }
+  (void)have_numeric;
+}
+
+/*
+  handle uavcan.protocol.param.GetSet request. Supports lookup by name
+  or by index. The set path is taken when the caller passes a name AND
+  a non-empty Value union; integers/booleans go through the scaling
+  helpers, strings (STARTUP_TUNE) go straight to EEPROM.
+
+  Set is refused when the EEPROM magic isn't set: we'd otherwise be
+  writing into a page full of 0xFF, and the application would treat
+  the result as uninitialised on next boot.
+*/
+static void handle_param_GetSet(CanardInstance* ins, CanardRxTransfer* transfer)
+{
+  struct uavcan_protocol_param_GetSetRequest req;
+  if (uavcan_protocol_param_GetSetRequest_decode(transfer, &req)) {
+    return;
+  }
+
+  const uint8_t *eeprom = (const uint8_t *)EEPROM_START_ADD;
+  int p_idx = -1;
+
+  if (req.name.len != 0) {
+    for (uint8_t i = 0; i < NUM_BL_PARAMS; i++) {
+      const char *pname = bl_parameters[i].name;
+      const uint32_t plen = strlen(pname);
+      if (req.name.len == plen &&
+          memcmp(req.name.data, pname, plen) == 0) {
+        p_idx = (int)i;
+        break;
+      }
+    }
+  } else if (req.index < NUM_BL_PARAMS) {
+    p_idx = req.index;
+  }
+
+  // Set path. Refuse if EEPROM is unprovisioned; refuse the EMPTY union
+  // (that's how a pure Get-by-name is signalled).
+  if (p_idx >= 0 && req.name.len != 0 &&
+      req.value.union_tag != UAVCAN_PROTOCOL_PARAM_VALUE_EMPTY &&
+      eeprom[0] == 0x01) {
+    const struct bl_param *p = &bl_parameters[p_idx];
+    switch (p->vtype) {
+    case BL_T_BOOL: {
+      uint16_t v;
+      if (req.value.union_tag == UAVCAN_PROTOCOL_PARAM_VALUE_BOOLEAN_VALUE) {
+        v = req.value.boolean_value ? 1 : 0;
+      } else if (req.value.union_tag == UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE) {
+        v = req.value.integer_value ? 1 : 0;
+      } else {
+        break;
+      }
+      bl_param_write_numeric((uint8_t)p_idx, v);
+      break;
+    }
+    case BL_T_UINT8:
+    case BL_T_UINT16: {
+      if (req.value.union_tag != UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE) {
+        break;
+      }
+      int64_t v = req.value.integer_value;
+      if (v < 0) v = 0;
+      if (v > 0xFFFF) v = 0xFFFF;
+      bl_param_write_numeric((uint8_t)p_idx, (uint16_t)v);
+      break;
+    }
+    case BL_T_STRING: {
+      if (req.value.union_tag != UAVCAN_PROTOCOL_PARAM_VALUE_STRING_VALUE) {
+        break;
+      }
+      // STARTUP_TUNE: 128-byte slot at offset 48. Bytes beyond the
+      // request length are padded to 0xFF, matching the main firmware.
+      uint8_t tune[EEPROM_TUNE_LEN];
+      const uint16_t slen = req.value.string_value.len;
+      for (uint16_t i = 0; i < sizeof(tune); i++) {
+        tune[i] = (i < slen) ? req.value.string_value.data[i] : 0xFF;
+      }
+      set_eeprom_bytes(EEPROM_OFS_TUNE, tune, sizeof(tune));
+      break;
+    }
+    }
+  }
+
+  // Build response.
+  struct uavcan_protocol_param_GetSetResponse pkt;
+  memset(&pkt, 0, sizeof(pkt));
+
+  if (p_idx >= 0) {
+    bl_param_fill_response(&pkt, (uint8_t)p_idx);
+    const char *pname = bl_parameters[p_idx].name;
+    pkt.name.len = strlen(pname);
+    memcpy(pkt.name.data, pname, pkt.name.len);
+  }
+
+  uint8_t buffer[UAVCAN_PROTOCOL_PARAM_GETSET_RESPONSE_MAX_SIZE];
+  uint16_t total_size = uavcan_protocol_param_GetSetResponse_encode(&pkt, buffer);
+
+  canardRequestOrRespond(ins,
+                         transfer->source_node_id,
+                         UAVCAN_PROTOCOL_PARAM_GETSET_SIGNATURE,
+                         UAVCAN_PROTOCOL_PARAM_GETSET_ID,
+                         &transfer->transfer_id,
+                         transfer->priority,
+                         CanardResponse,
+                         &buffer[0],
+                         total_size);
 }
 
 /*
@@ -208,6 +648,10 @@ static void handle_param_ExecuteOpcode(CanardInstance* ins, CanardRxTransfer* tr
     can_print("resetting to defaults");
     save_flash_nolib(default_settings, sizeof(default_settings), EEPROM_START_ADD);
     pkt.ok = true;
+  } else if (req.opcode == UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_REQUEST_OPCODE_SAVE) {
+    // GetSet writes parameters straight to flash, so SAVE is a no-op; ack it
+    // so DroneCAN parameter clients that send SAVE see success.
+    pkt.ok = true;
   }
 
 
@@ -224,6 +668,7 @@ static void handle_param_ExecuteOpcode(CanardInstance* ins, CanardRxTransfer* tr
                          &buffer[0],
                          total_size);
 }
+#endif // DRONECAN_PARAM_SUPPORT_ENABLED
 
 /*
   handle RestartNode request
@@ -245,7 +690,8 @@ static void handle_GetNodeInfo(CanardInstance *ins, CanardRxTransfer *transfer)
 
   memset(&pkt, 0, sizeof(pkt));
 
-  node_status.uptime_sec = micros64() / 1000000ULL;
+  // uptime_sec is maintained by process1HzTasks via a 1Hz tick counter,
+  // not derived from the 71-minute-wrapping microsecond timer.
   pkt.status = node_status;
 
   // fill in your major and minor firmware version
@@ -534,10 +980,16 @@ static void onTransferReceived(CanardInstance *ins, CanardRxTransfer *transfer)
       handle_begin_firmware_update(ins, transfer);
       break;
     }
+#if DRONECAN_PARAM_SUPPORT_ENABLED
     case UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_ID: {
       handle_param_ExecuteOpcode(ins, transfer);
       break;
     }
+    case UAVCAN_PROTOCOL_PARAM_GETSET_ID: {
+      handle_param_GetSet(ins, transfer);
+      break;
+    }
+#endif
     }
   }
   if (transfer->transfer_type == CanardTransferTypeResponse) {
@@ -589,10 +1041,16 @@ static bool shouldAcceptTransfer(const CanardInstance *ins,
       *out_data_type_signature = UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE_SIGNATURE;
       return true;
     }
+#if DRONECAN_PARAM_SUPPORT_ENABLED
     case UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_ID: {
       *out_data_type_signature = UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_SIGNATURE;
       return true;
     }
+    case UAVCAN_PROTOCOL_PARAM_GETSET_ID: {
+      *out_data_type_signature = UAVCAN_PROTOCOL_PARAM_GETSET_SIGNATURE;
+      return true;
+    }
+#endif
     }
   }
   if (transfer_type == CanardTransferTypeResponse) {
@@ -628,7 +1086,8 @@ static void send_NodeStatus(void)
 {
   uint8_t buffer[UAVCAN_PROTOCOL_GETNODEINFO_RESPONSE_MAX_SIZE];
 
-  node_status.uptime_sec = micros64() / 1000000ULL;
+  // uptime_sec is maintained by process1HzTasks (1Hz tick counter), not
+  // derived from the wrapping microsecond timer.
   node_status.health = UAVCAN_PROTOCOL_NODESTATUS_HEALTH_OK;
   node_status.mode = UAVCAN_PROTOCOL_NODESTATUS_MODE_MAINTENANCE;
   node_status.sub_mode = 0;
@@ -661,17 +1120,27 @@ static void send_NodeStatus(void)
 /*
   This function is called at 1 Hz rate from the main loop.
 */
-static void process1HzTasks(uint64_t timestamp_usec)
+static void process1HzTasks(uint32_t timestamp_usec)
 {
   /*
-    Purge transfers that are no longer transmitted. This can free up some memory
+    Purge transfers that are no longer transmitted. This can free up some memory.
+    Canard's API is uint64_t; zero-extend here. Stale-transfer timeout is
+    CANARD_TRANSFER_TIMEOUT_USEC (~2s), well below the uint32 wrap window.
   */
-  canardCleanupStaleTransfers(&canard, timestamp_usec);
+  canardCleanupStaleTransfers(&canard, (uint64_t)timestamp_usec);
 
   /*
-    Transmit the node status message
+    Transmit the node status message. uptime_sec is bumped AFTER the
+    broadcast so the first NodeStatus (which fires almost immediately
+    after boot) reports uptime=0, matching the old micros64()-based
+    semantics.
   */
   send_NodeStatus();
+
+  /*
+    wraps at 136 years
+  */
+  node_status.uptime_sec++;
 }
 
 /*
@@ -681,7 +1150,8 @@ void DroneCAN_receiveFrame(void)
 {
   CanardCANFrame rx_frame = {0};
   while (sys_can_receive(&rx_frame) > 0) {
-    canardHandleRxFrame(&canard, &rx_frame, micros64());
+    can_seen = true;
+    canardHandleRxFrame(&canard, &rx_frame, (uint64_t)micros32());
   }
 }
 
@@ -690,7 +1160,8 @@ void DroneCAN_receiveFrame(void)
 */
 void DroneCAN_handleFrame(CanardCANFrame *frame)
 {
-  canardHandleRxFrame(&canard, frame, micros64());
+  can_seen = true;
+  canardHandleRxFrame(&canard, frame, (uint64_t)micros32());
 }
 
 /*
@@ -753,6 +1224,26 @@ static void DroneCAN_Startup(void)
   // initialise low level CAN peripheral hardware
   sys_can_init();
 
+#ifdef CAN_TERM_PIN
+  /*
+    apply the CAN bus termination setting from the EEPROM. Byte 183 is
+    eepromBuffer.can.term_enable (declared in ../AM32/Inc/eeprom.h). Mirror the
+    main firmware's load_settings(): an out-of-[0,1]-range byte falls back to the
+    default. default_settings[] only covers the first 48 bytes, so on a
+    defaults-seeded or erased EEPROM byte 183 reads 0xff -> default 0 (disabled),
+    matching the main firmware's default.
+   */
+  {
+    const uint8_t *eeprom = (const uint8_t *)EEPROM_START_ADD;
+    uint8_t term = eeprom[183];
+    if (term > 1) {
+      term = 0; // out of range -> default (disabled)
+    }
+    const bool term_enable = (eeprom[0] == 1) && (term != 0);
+    setup_portpin(CAN_TERM_PIN, term_enable ? CAN_TERM_POLARITY : !CAN_TERM_POLARITY);
+  }
+#endif
+
 #if 0
   if (fwupdate.node_id != 0) {
     can_print("fwupdate startup");
@@ -768,7 +1259,7 @@ static void DroneCAN_Startup(void)
  */
 bool DroneCAN_update()
 {
-  static uint64_t next_1hz_service_at;
+  static uint32_t next_1hz_service_at;
   static bool done_startup;
   if (!done_startup) {
     done_startup = true;
@@ -778,6 +1269,33 @@ bool DroneCAN_update()
   sys_can_disable_IRQ();
 
   DroneCAN_processTxQueue();
+
+  /*
+    arm the no-CAN fallback. Must run before the DNA early-return below (with no
+    cable the node never gets an ID, so that returns false forever). After
+    NONCAN_FALLBACK_MS with no raw command and no CAN seen, relax the boot gate
+    unless INPUT_SIGNAL_TYPE is DroneCAN. A blank EEPROM arms, but the
+    short-circuit below still refuses to boot it.
+   */
+  if (!have_raw_command && !noncan_fallback && !can_seen &&
+      millis32() > NONCAN_FALLBACK_MS) {
+    const uint8_t *ee = (const uint8_t *)EEPROM_START_ADD;
+    const bool wait_can = (ee[0] == 0x01 && ee[46] == DRONECAN_INPUT_TYPE);
+    if (!wait_can) {
+      noncan_fallback = true;
+    }
+  }
+  if (noncan_fallback && !can_seen) {
+    // fallen back and still no CAN: boot like a non-CAN build. Like the non-CAN
+    // build, refuse a blank/unprogrammed EEPROM (byte0 != 0x01) rather than let
+    // DroneCAN_boot_ok() seed defaults and boot it. If a CAN frame arrives
+    // later, can_seen vetoes this and DNA/CAN handling resumes below.
+    sys_can_enable_IRQ();
+    if (*(const uint8_t *)EEPROM_START_ADD != 0x01) {
+      return false;
+    }
+    return DroneCAN_boot_ok();
+  }
 
   // see if we are still doing DNA
   if (canardGetLocalNodeID(&canard) == CANARD_BROADCAST_NODE_ID) {
@@ -789,10 +1307,13 @@ bool DroneCAN_update()
     return false;
   }
 
-  const uint64_t ts = micros64();
+  const uint32_t ts = micros32();
 
-  if (ts >= next_1hz_service_at) {
-    next_1hz_service_at += 1000000ULL;
+  /*
+    1Hz tick
+   */
+  if ((int32_t)(ts - next_1hz_service_at) >= 0) {
+    next_1hz_service_at = ts + 1000000U;
     process1HzTasks(ts);
   }
 
@@ -831,10 +1352,11 @@ static void *bl_memmem(const void *haystack, size_t haystacklen, const void *nee
 
 static void set_reason(enum boot_code code, const char *reason)
 {
-  static uint64_t last_msg_us;
+  static uint32_t last_msg_us;
   node_status.vendor_specific_status_code = code;
-  const uint64_t now_us = micros64();
-  if (now_us - last_msg_us > 5000000UL) {
+  // unsigned subtraction handles uint32 wrap
+  const uint32_t now_us = micros32();
+  if (now_us - last_msg_us > 5000000U) {
     last_msg_us = now_us;
     can_print(reason);
   }
@@ -885,8 +1407,11 @@ bool DroneCAN_boot_ok(void)
   }
 #endif
 
-  if (!have_raw_command) {
-    set_reason(FAIL_REASON_BAD_CRC, "no signal");
+  // waive the raw-command requirement under no-CAN fallback. The !can_seen
+  // re-check closes the late-frame race: a frame arriving after fallback armed
+  // re-blocks the boot and reverts to CAN behaviour.
+  if (!have_raw_command && !(noncan_fallback && !can_seen)) {
+    set_reason(FAIL_REASON_NO_SIGNAL, "no signal");
     return false;
   }
 
