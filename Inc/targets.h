@@ -64,6 +64,9 @@
 #define FILE_NAME "ARK_G431_CAN"   // parser: MCU=G431, CAN build
 #define TARGET_TAG ARKG4           // -> AM32_G431_BOOTLOADER_ARKG4_CAN
 #define USE_PB4                    // bit-banged comms pin
+/* Must match ARK32 Inc/targets.h. PX4 board_id = (major << 8) | minor = 71. */
+#define DRONECAN_HW_VERSION_MAJOR 0
+#define DRONECAN_HW_VERSION_MINOR 71
 
 // FDCAN1 pins: RX PA11, TX PB9 (AF9)
 #define CAN_RX_PORT GPIOA

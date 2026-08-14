@@ -700,9 +700,13 @@ static void handle_GetNodeInfo(CanardInstance *ins, CanardRxTransfer *transfer)
   pkt.software_version.optional_field_flags = 0;
   pkt.software_version.vcs_commit = 0; // should put git hash in here
 
-  // should fill in hardware version
+#ifdef DRONECAN_HW_VERSION_MAJOR
+  pkt.hardware_version.major = DRONECAN_HW_VERSION_MAJOR;
+  pkt.hardware_version.minor = DRONECAN_HW_VERSION_MINOR;
+#else
   pkt.hardware_version.major = 2;
   pkt.hardware_version.minor = 3;
+#endif
 
   sys_can_getUniqueID(pkt.hardware_version.unique_id);
 
