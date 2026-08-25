@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: 'ubuntu-latest'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build bootloaders and updaters
+        run: |
+          make arm_sdk_install
+          make -j8
+          make updaters -j8
+
+      - name: Stage release assets
+        run: |
+          mkdir -p release
+          cp obj/*.hex release/
+          rm -f release/*_BL_UPDATER_*.hex
+          (cd release && zip -q AM32-bootloaders-hex.zip *.hex)
+          (cd obj && zip -q ../release/AM32-bootloader-updaters-hex.zip *_BL_UPDATER_*.hex)
+          (cd obj && zip -q ../release/AM32-bootloader-updaters-amj.zip *_BL_UPDATER_*.amj)
+
+      # A board whose target is in ALL_BUILDS but missing from the release is
+      # the failure this workflow exists to prevent, so fail the tag instead.
+      - name: Check every board target shipped
+        run: |
+          missing=0
+          for target in $(make -s targets | tail -n1); do
+            ls release/${target}_V*.hex >/dev/null 2>&1 || { echo "missing: $target"; missing=1; }
+          done
+          exit $missing
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" release/* --clobber
