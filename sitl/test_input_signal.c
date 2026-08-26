@@ -41,9 +41,14 @@
   device info the bootloader answers a configurator with, for the
   F051 / PB4 target this is built for: '4','7','1', pin code, flash
   size code, 0x06, 0x06, protocol version, 0x30
+
+  Protocol version 3 adds ADDRESS_MAGIC_DEVINFO (self-describing region
+  map) but the 9-byte deviceInfo reply is unchanged aside from the
+  version byte. Keep this in sync with BOOTLOADER_PROTOCOL_VERSION in
+  bootloader/main.c.
  */
 static const uint8_t expected_devinfo[9] = {'4',  '7',  '1',  0x14, 0x1F,
-                                            0x06, 0x06, 0x02, 0x30};
+                                            0x06, 0x06, 0x03, 0x30};
 
 typedef struct {
     const char *name;
