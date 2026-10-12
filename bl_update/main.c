@@ -15,7 +15,7 @@
 
 #include <string.h>
 
-#if defined(MCXA153)
+#if defined(MCXA133)
 #define GPIO_PORT_TYPE PORT_Type*
 #else
 #define GPIO_PORT_TYPE typeof(GPIOA)
@@ -30,11 +30,11 @@ static uint32_t input_pin;
 #endif
 
 #if !DRONECAN_SUPPORT
-#ifdef MCXA153
+#ifdef MCXA133
 #define FIRMWARE_RELATIVE_START 0x4000
 #else
 #define FIRMWARE_RELATIVE_START 0x1000
-#endif // MCXA153
+#endif // MCXA133
 #else
 
 #define FIRMWARE_RELATIVE_START 0x4000
