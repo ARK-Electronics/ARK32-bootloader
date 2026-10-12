@@ -1,9 +1,7 @@
 /*
 ** ###################################################################
-**     Processors:          MCXA153VFM
-**                          MCXA153VFT
-**                          MCXA153VLF
-**                          MCXA153VLH
+**     Processors:          MCXA133VFM
+**                          MCXA133VFT
 **
 **     Compilers:           GNU C Compiler
 **                          IAR ANSI C/C++ Compiler for ARM
@@ -34,10 +32,10 @@
 */
 
 /*!
- * @file MCXA153
+ * @file MCXA133
  * @version 1.0
  * @date 2022-03-29
- * @brief Device specific configuration file for MCXA153 (implementation file)
+ * @brief Device specific configuration file for MCXA133 (implementation file)
  *
  * Provides a system configuration function and a global variable that contains
  * the system frequency. It configures the device and initializes the oscillator
