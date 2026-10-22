@@ -13,15 +13,14 @@
  *
  * The CPU macro should be declared in the project or makefile.
  */
-#if (defined(CPU_MCXA153VFM) || defined(CPU_MCXA153VFT) || defined(CPU_MCXA153VLF) || \
-    defined(CPU_MCXA153VLH))
+#if (defined(CPU_MCXA133VFM) || defined(CPU_MCXA133VFT))
 
-#define MCXA153_SERIES
+#define MCXA133_SERIES
 
 /* CMSIS-style register definitions */
-#include "MCXA153.h"
+#include "MCXA133.h"
 /* CPU specific feature definitions */
-#include "MCXA153_features.h"
+#include "MCXA133_features.h"
 
 #else
     #error "No valid CPU defined!"

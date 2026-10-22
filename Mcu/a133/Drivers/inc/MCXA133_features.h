@@ -20,8 +20,8 @@
 ** ###################################################################
 */
 
-#ifndef _MCXA153_FEATURES_H_
-#define _MCXA153_FEATURES_H_
+#ifndef _MCXA133_FEATURES_H_
+#define _MCXA133_FEATURES_H_
 
 /* SOC module features */
 
@@ -75,8 +75,6 @@
 #define FSL_FEATURE_SOC_SCG_COUNT (1)
 /* @brief SYSCON availability on the SoC. */
 #define FSL_FEATURE_SOC_SYSCON_COUNT (1)
-/* @brief USB availability on the SoC. */
-#define FSL_FEATURE_SOC_USB_COUNT (1)
 /* @brief UTICK availability on the SoC. */
 #define FSL_FEATURE_SOC_UTICK_COUNT (1)
 /* @brief WAKETIMER availability on the SoC. */
@@ -156,16 +154,6 @@
 #define FSL_FEATURE_LPADC_HAS_CFG_HPT_EXDI (1)
 /* @brief Indicate LPADC CFG register TPRICTRL bitfield width. */
 #define FSL_FEATURE_LPADC_CFG_TPRICTRL_BITFIELD_WIDTH (2)
-/* @brief Has internal temperature sensor. */
-#define FSL_FEATURE_LPADC_HAS_INTERNAL_TEMP_SENSOR (1)
-/* @brief Temperature sensor parameter A (slope). */
-#define FSL_FEATURE_LPADC_TEMP_PARAMETER_A (738.0f)
-/* @brief Temperature sensor parameter B (offset). */
-#define FSL_FEATURE_LPADC_TEMP_PARAMETER_B (287.5f)
-/* @brief Temperature sensor parameter Alpha. */
-#define FSL_FEATURE_LPADC_TEMP_PARAMETER_ALPHA (10.06f)
-/* @brief The buffer size of temperature sensor. */
-#define FSL_FEATURE_LPADC_TEMP_SENS_BUFFER_SIZE (2U)
 
 /* AOI module features */
 
@@ -602,31 +590,6 @@
 /* @brief Starter register discontinuous. */
 #define FSL_FEATURE_SYSCON_STARTER_DISCONTINUOUS (1)
 
-/* USB module features */
-
-/* @brief KHCI module instance count */
-#define FSL_FEATURE_USB_KHCI_COUNT (1)
-/* @brief HOST mode enabled */
-#define FSL_FEATURE_USB_KHCI_HOST_ENABLED (0)
-/* @brief OTG mode enabled */
-#define FSL_FEATURE_USB_KHCI_OTG_ENABLED (0)
-/* @brief Size of the USB dedicated RAM */
-#define FSL_FEATURE_USB_KHCI_USB_RAM (0)
-/* @brief Has KEEP_ALIVE_CTRL register */
-#define FSL_FEATURE_USB_KHCI_KEEP_ALIVE_ENABLED (0)
-/* @brief Has the Dynamic SOF threshold compare support */
-#define FSL_FEATURE_USB_KHCI_DYNAMIC_SOF_THRESHOLD_COMPARE_ENABLED (0)
-/* @brief Has the VBUS detect support */
-#define FSL_FEATURE_USB_KHCI_VBUS_DETECT_ENABLED (0)
-/* @brief Has the IRC48M module clock support */
-#define FSL_FEATURE_USB_KHCI_IRC48M_MODULE_CLOCK_ENABLED (1)
-/* @brief Number of endpoints supported */
-#define FSL_FEATURE_USB_ENDPT_COUNT (16)
-/* @brief Has STALL_IL/OL_DIS registers */
-#define FSL_FEATURE_USB_KHCI_HAS_STALL_LOW (1)
-/* @brief Has STALL_IH/OH_DIS registers */
-#define FSL_FEATURE_USB_KHCI_HAS_STALL_HIGH (1)
-
 /* UTICK module features */
 
 /* @brief UTICK does not support PD configure. */
@@ -654,5 +617,5 @@
 /* @brief Has no RESET register. */
 #define FSL_FEATURE_WWDT_HAS_NO_RESET (1)
 
-#endif /* _MCXA153_FEATURES_H_ */
+#endif /* _MCXA133_FEATURES_H_ */
 
