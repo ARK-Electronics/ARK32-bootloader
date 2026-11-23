@@ -1,13 +1,13 @@
-MCU := A153
-PART := MCXA153
+MCU := A133
+PART := MCXA133
 
 MCU_LC := $(call lc,$(MCU))
 
 HAL_FOLDER_$(MCU) := $(HAL_FOLDER)/$(MCU_LC)
 
 MCU_$(MCU) := -mcpu=cortex-m33+nodsp -mthumb
-$(MCU)_LDSCRIPT := Mcu/a153/MCXA_FLASH.ld
-$(MCU)_LDSCRIPT_BLU := Mcu/a153/MCXA_FLASH_blu.ld
+$(MCU)_LDSCRIPT := Mcu/a133/MCXA_FLASH.ld
+$(MCU)_LDSCRIPT_BLU := Mcu/a133/MCXA_FLASH_blu.ld
 
 SRC_BASE_DIR_$(MCU) := \
 	$(HAL_FOLDER_$(MCU))/Startup \
@@ -20,7 +20,7 @@ CFLAGS_$(MCU) := \
 
 CFLAGS_$(MCU) += \
 	 -D$(PART) \
-	 -DCPU_MCXA153VLH \
+	 -DCPU_MCXA133VFM \
 	 -DMCU_FLASH_START=0x0 \
 	 -DEEPROM_MAX_SIZE=0x180 \
 	 -DFLASH_SECTOR_SIZE=0x2000 \

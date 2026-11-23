@@ -1,9 +1,7 @@
 /*
 ** ###################################################################
-**     Processors:          MCXA153VFM
-**                          MCXA153VFT
-**                          MCXA153VLF
-**                          MCXA153VLH
+**     Processors:          MCXA133VFM
+**                          MCXA133VFT
 **
 **     Compilers:           GNU C Compiler
 **                          IAR ANSI C/C++ Compiler for ARM
@@ -34,18 +32,18 @@
 */
 
 /*!
- * @file MCXA153
+ * @file MCXA133
  * @version 1.0
  * @date 2022-03-29
- * @brief Device specific configuration file for MCXA153 (header file)
+ * @brief Device specific configuration file for MCXA133 (header file)
  *
  * Provides a system configuration function and a global variable that contains
  * the system frequency. It configures the device and initializes the oscillator
  * (PLL) that is part of the microcontroller device.
  */
 
-#ifndef _SYSTEM_MCXA153_H_
-#define _SYSTEM_MCXA153_H_                       /**< Symbol preventing repeated inclusion */
+#ifndef _SYSTEM_MCXA133_H_
+#define _SYSTEM_MCXA133_H_                       /**< Symbol preventing repeated inclusion */
 
 #ifdef __cplusplus
 extern "C" {
@@ -106,4 +104,4 @@ void SystemInitHook (void);
 }
 #endif
 
-#endif  /* _SYSTEM_MCXA153_H_ */
+#endif  /* _SYSTEM_MCXA133_H_ */

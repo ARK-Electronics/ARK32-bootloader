@@ -1,3 +1,10 @@
+/*
+ * Copyright 2023 NXP
+ * All rights reserved.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
 //! @brief Root of the bootloader API tree.
 //!
 //! An instance of this struct resides in read-only memory in the bootloader. It
@@ -9,8 +16,8 @@
 
 #pragma once
 
-#ifndef MCU_A153_INC_MCXA153_ROM_API_H_
-#define MCU_A153_INC_MCXA153_ROM_API_H_
+#ifndef MCU_A133_INC_MCXA133_ROM_API_H_
+#define MCU_A133_INC_MCXA133_ROM_API_H_
 
 /*! @brief Type used for all status and error return values. */
 //typedef int32_t status_t;

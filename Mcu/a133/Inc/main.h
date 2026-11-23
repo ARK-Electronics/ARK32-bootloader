@@ -30,9 +30,9 @@ extern "C" {
 
 /* Includes
  * ------------------------------------------------------------------*/
-#include <MCXA153.h>
-#include "mcxa153_common.h"
-#include "mcxa153_rom_api.h"
+#include <MCXA133.h>
+#include "mcxa133_common.h"
+#include "mcxa133_rom_api.h"
 
 /* Private includes
  * ----------------------------------------------------------*/

@@ -1,5 +1,5 @@
 //*****************************************************************************
-// MCXA153 startup code for use with MCUXpresso IDE
+// MCXA133 startup code for use with MCUXpresso IDE
 //
 // Version : 040724
 //*****************************************************************************
@@ -285,7 +285,7 @@ void (* const g_pfnVectors[])(void) = {
     PendSV_Handler,                    // PendSV Handler
     SysTick_Handler,                   // SysTick Handler
 
-    // Chip Level - MCXA153
+    // Chip Level - MCXA133
     Reserved16_IRQHandler,             // 16: Reserved interrupt
     CMC_IRQHandler,                    // 17: Core Mode Controller interrupt
     DMA_CH0_IRQHandler,                // 18: DMA3_0_CH0 error or transfer complete

@@ -1,12 +1,11 @@
 /*
- * mcxa153_common.h
+ * Copyright 2024 NXP
  *
- *  Created on: 13 Nov 2024
- *      Author: nxg09992
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
-#ifndef MCU_A153_INC_MCXA153_COMMON_H_
-#define MCU_A153_INC_MCXA153_COMMON_H_
+#ifndef MCU_A133_INC_MCXA133_COMMON_H_
+#define MCU_A133_INC_MCXA133_COMMON_H_
 
 #include "main.h"
 
@@ -34,4 +33,4 @@ static inline void modifyReg8(volatile uint8_t *regAddr, uint8_t clearbits, uint
 	*regAddr = reg;
 }
 
-#endif /* MCU_A153_INC_MCXA153_COMMON_H_ */
+#endif /* MCU_A133_INC_MCXA133_COMMON_H_ */
